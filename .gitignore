@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Database
+backend/smd.db
+backend/*.db
+
+# ML models
+backend/models_store/*.pkl
+
+# Env
+.env
+*.env
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Temp
+tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code — local/personal settings, not shared project config
+.claude/settings.local.json
+.claude/*.tmp
