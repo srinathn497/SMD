@@ -3,8 +3,21 @@ import { TrendingUp, TrendingDown, Brain, AlertTriangle, Newspaper, Zap, Info, R
 import Badge, { toneFromSignal } from '../ui/Badge'
 import Tooltip from '../ui/Tooltip'
 import ExpandableSection from '../ui/ExpandableSection'
+import SegmentedControl from '../ui/SegmentedControl'
 import FeatureImportanceChart from './FeatureImportanceChart'
+import SignalIntelligence from './SignalIntelligence'
+import PredictionHistoryTab from './PredictionHistoryTab'
+import ScenarioCalculator from './ScenarioCalculator'
 import { usePrediction, useClearPredictionCache } from '../../api/signals'
+
+// ── Internal sub-tabs — Prediction (live call) / Model Report (how good has
+// this model been) / Scenario (what-if calculator). Keeps one data fetch and
+// one period/horizon state shared across all three instead of three cards.
+const SECTIONS = [
+  { key: 'prediction', label: 'Prediction' },
+  { key: 'report',     label: 'Model Report' },
+  { key: 'scenario',   label: 'Scenario' },
+]
 
 // ── Feature tooltip dictionary ─────────────────────────────────────────────────
 const FEATURE_TIPS = {
@@ -326,6 +339,7 @@ function ModelInsights({ data }) {
 
 // ── Main component ─────────────────────────────────────────────────────────────
 export default function PredictionCard({ symbol, assetType, onPeriodChange, onHorizonChange }) {
+  const [section, setSection] = useState('prediction')
   const [period, setPeriod] = useState('3y')
   const [horizon, setHorizon] = useState('1d')
   const handlePeriodChange = (p) => { setPeriod(p); onPeriodChange?.(p) }
@@ -346,9 +360,9 @@ export default function PredictionCard({ symbol, assetType, onPeriodChange, onHo
   const maxImportance = data?.top_features?.[0]?.[1] ?? 1
 
   return (
-    <div className="card space-y-4">
+    <div className="card space-y-3">
 
-      {/* ── Header ── */}
+      {/* ── Header (common to all sub-tabs) ── */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Brain size={16} className="text-purple-400" />
@@ -360,70 +374,19 @@ export default function PredictionCard({ symbol, assetType, onPeriodChange, onHo
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <Tooltip text="Force retrain — deletes the saved model and runs a full retrain + walk-forward validation from scratch. Takes 10–20s." align="right">
-            <button
-              onClick={() => !isRefreshing && clearCache.mutate()}
-              disabled={isRefreshing}
-              className="p-1 rounded text-slate-600 hover:text-slate-300 hover:bg-dark-700 transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
-            >
-              <RefreshCw size={13} className={isRefreshing ? 'animate-spin text-brand-400' : ''} />
-            </button>
-          </Tooltip>
-          <div className="flex items-center gap-1">
-          <span className="text-xs text-slate-600 mr-1">Train on</span>
-          {PERIODS.map(p => (
-            <Tooltip key={p.value} text={p.tip} align="right">
-              <button
-                onClick={() => handlePeriodChange(p.value)}
-                className={`px-2 py-0.5 text-xs rounded font-medium transition-colors cursor-pointer ${
-                  period === p.value
-                    ? p.warn ? 'bg-amber-600/30 text-amber-300 border border-amber-600/50'
-                             : 'bg-brand-600 text-white'
-                    : 'bg-dark-700 text-slate-400 hover:text-slate-200'
-                }`}>
-                {p.label}
-              </button>
-            </Tooltip>
-          ))}
-          </div>
-        </div>
+        <Tooltip text="Force retrain — deletes the saved model and runs a full retrain + walk-forward validation from scratch. Takes 10–20s." align="right">
+          <button
+            onClick={() => !isRefreshing && clearCache.mutate()}
+            disabled={isRefreshing}
+            className="p-1 rounded text-slate-600 hover:text-slate-300 hover:bg-dark-700 transition-colors disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
+          >
+            <RefreshCw size={13} className={isRefreshing ? 'animate-spin text-brand-400' : ''} />
+          </button>
+        </Tooltip>
       </div>
 
-      {/* ── Horizon tabs ── */}
-      <div className="flex items-center gap-1">
-        <span className="text-xs text-slate-600 mr-1">Horizon</span>
-        {HORIZONS.map(h => (
-          <Tooltip key={h.value} text={h.tip}>
-            <button
-              onClick={() => handleHorizonChange(h.value)}
-              className={`px-3 py-1 text-xs rounded font-medium transition-colors cursor-pointer ${
-                horizon === h.value
-                  ? 'bg-purple-600/70 text-purple-100 border border-purple-500/50'
-                  : 'bg-dark-700 text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              {h.label}
-            </button>
-          </Tooltip>
-        ))}
-      </div>
-
-      {/* ── 6M warning ── */}
-      {period === '6mo' && (
-        <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
-          <AlertTriangle size={12} className="flex-shrink-0" />
-          6M window is borderline (~78 samples). Use 1Y+ for reliable results.
-        </div>
-      )}
-
-      {/* ── Earnings blackout banner ── */}
-      {data?.earnings_blackout_active && (
-        <div className="flex items-center gap-2 text-xs text-orange-400 bg-orange-500/10 border border-orange-500/20 rounded-lg px-3 py-2">
-          <AlertTriangle size={12} className="flex-shrink-0" />
-          <span><strong>Earnings Blackout</strong> — an earnings announcement is within 5 days or just occurred. Price will react to EPS surprise, not chart patterns. Treat with extra caution.</span>
-        </div>
-      )}
+      {/* ── Sub-tabs: Prediction / Model Report / Scenario ── */}
+      <SegmentedControl options={SECTIONS} value={section} onChange={setSection} variant="neutral" />
 
       {/* ── Loading ── */}
       {isPending && (
@@ -446,163 +409,237 @@ export default function PredictionCard({ symbol, assetType, onPeriodChange, onHo
 
       {/* ── Results ── */}
       {!isPending && !error && data && (
-      <div className={isRefreshing ? 'opacity-40 pointer-events-none select-none' : ''}>
+      <div className={`space-y-4 ${isRefreshing ? 'opacity-40 pointer-events-none select-none' : ''}`}>
 
-        {/* "What this predicts" strip — makes it crystal clear this is a FUTURE prediction */}
-        {(() => {
-          const hw = HORIZON_WHAT[data.horizon ?? '1d']
-          return (
-            <div className="flex items-center gap-2 text-xs bg-dark-700/50 rounded-lg px-3 py-2 border border-dark-600/50">
-              <span className="px-1.5 py-0.5 rounded bg-purple-900/50 text-purple-300 border border-purple-700/40 font-medium whitespace-nowrap">
-                {hw.badge}
-              </span>
-              <span className="text-slate-400">{hw.label}</span>
-            </div>
-          )
-        })()}
-
-        {/* Regime badge */}
-        {data.regime && data.regime !== 'NEUTRAL' && (
-          <Tooltip
-            text={data.regime === 'BULL'
-              ? 'Bull Regime — S&P 500 up >3% over 20 days. Risk-on environment; bullish setups have higher follow-through.'
-              : 'Bear Regime — S&P 500 down >3% over 20 days. Risk-off environment; mean-reversion setups often backfire.'}
-            wide
-          >
-            <div className={`inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full border cursor-help mb-1 ${
-              data.regime === 'BULL'
-                ? 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40'
-                : 'bg-red-900/40 text-red-400 border-red-700/40'
-            }`}>
-              {data.regime === 'BULL' ? '↑ Bull Regime' : '↓ Bear Regime'}
-            </div>
-          </Tooltip>
-        )}
-
-        {/* Direction + confidence */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Icon size={22} className={dirColor} />
-            <Badge tone={toneFromSignal(data.direction)} size="lg">{data.direction}</Badge>
-          </div>
-          <Tooltip text={SECTION_TIPS.confidence} wide align="right">
-            <div className="text-right cursor-help">
-              <div className="flex items-center justify-end gap-1.5">
-                <span className={`text-2xl font-bold ${dirColor}`}>{data.confidence_pct}%</span>
-                {data.is_calibrated ? (
-                  <span className={`text-xs px-1.5 py-0.5 rounded border ${
-                    data.regime === 'BEAR'
-                      ? 'bg-red-900/40 text-red-300 border-red-700/40'
-                      : data.regime === 'BULL'
-                      ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700/40'
-                      : 'bg-cyan-900/50 text-cyan-400 border-cyan-700/40'
+        {section === 'prediction' && (
+        <>
+          {/* Period selector */}
+          <div className="flex items-center gap-1 flex-wrap">
+            <span className="text-xs text-slate-600 mr-1">Train on</span>
+            {PERIODS.map(p => (
+              <Tooltip key={p.value} text={p.tip} align="right">
+                <button
+                  onClick={() => handlePeriodChange(p.value)}
+                  className={`px-2 py-0.5 text-xs rounded font-medium transition-colors cursor-pointer ${
+                    period === p.value
+                      ? p.warn ? 'bg-amber-600/30 text-amber-300 border border-amber-600/50'
+                               : 'bg-brand-600 text-white'
+                      : 'bg-dark-700 text-slate-400 hover:text-slate-200'
                   }`}>
-                    CAL{data.regime && data.regime !== 'NEUTRAL' ? `-${data.regime}` : ''}
-                  </span>
-                ) : (
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-dark-600 text-slate-600 border border-dark-500/40">
-                    RAW
-                  </span>
-                )}
+                  {p.label}
+                </button>
+              </Tooltip>
+            ))}
+          </div>
+
+          {/* Horizon tabs */}
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-slate-600 mr-1">Horizon</span>
+            {HORIZONS.map(h => (
+              <Tooltip key={h.value} text={h.tip}>
+                <button
+                  onClick={() => handleHorizonChange(h.value)}
+                  className={`px-3 py-1 text-xs rounded font-medium transition-colors cursor-pointer ${
+                    horizon === h.value
+                      ? 'bg-purple-600/70 text-purple-100 border border-purple-500/50'
+                      : 'bg-dark-700 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {h.label}
+                </button>
+              </Tooltip>
+            ))}
+          </div>
+
+          {/* 6M warning */}
+          {period === '6mo' && (
+            <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+              <AlertTriangle size={12} className="flex-shrink-0" />
+              6M window is borderline (~78 samples). Use 1Y+ for reliable results.
+            </div>
+          )}
+
+          {/* Earnings blackout banner */}
+          {data.earnings_blackout_active && (
+            <div className="flex items-center gap-2 text-xs text-orange-400 bg-orange-500/10 border border-orange-500/20 rounded-lg px-3 py-2">
+              <AlertTriangle size={12} className="flex-shrink-0" />
+              <span><strong>Earnings Blackout</strong> — an earnings announcement is within 5 days or just occurred. Price will react to EPS surprise, not chart patterns. Treat with extra caution.</span>
+            </div>
+          )}
+
+          {/* "What this predicts" strip — makes it crystal clear this is a FUTURE prediction */}
+          {(() => {
+            const hw = HORIZON_WHAT[data.horizon ?? '1d']
+            return (
+              <div className="flex items-center gap-2 text-xs bg-dark-700/50 rounded-lg px-3 py-2 border border-dark-600/50">
+                <span className="px-1.5 py-0.5 rounded bg-purple-900/50 text-purple-300 border border-purple-700/40 font-medium whitespace-nowrap">
+                  {hw.badge}
+                </span>
+                <span className="text-slate-400">{hw.label}</span>
               </div>
-              <p className="text-xs text-slate-600">confidence</p>
-            </div>
-          </Tooltip>
-        </div>
+            )
+          })()}
 
-        {/* Sentiment adjustment */}
-        <SentimentAdjustment
-          raw={data.raw_confidence_pct}
-          adjusted={data.confidence_pct}
-          sentiment_label={data.sentiment_label}
-        />
+          {/* Regime badge */}
+          {data.regime && data.regime !== 'NEUTRAL' && (
+            <Tooltip
+              text={data.regime === 'BULL'
+                ? 'Bull Regime — S&P 500 up >3% over 20 days. Risk-on environment; bullish setups have higher follow-through.'
+                : 'Bear Regime — S&P 500 down >3% over 20 days. Risk-off environment; mean-reversion setups often backfire.'}
+              wide
+            >
+              <div className={`inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full border cursor-help mb-1 ${
+                data.regime === 'BULL'
+                  ? 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40'
+                  : 'bg-red-900/40 text-red-400 border-red-700/40'
+              }`}>
+                {data.regime === 'BULL' ? '↑ Bull Regime' : '↓ Bear Regime'}
+              </div>
+            </Tooltip>
+          )}
 
-        {/* Price + magnitude */}
-        <div className="grid grid-cols-3 gap-3 text-xs">
-          <div className="bg-dark-700/50 rounded-lg p-2.5">
-            <p className="text-slate-600 mb-0.5">Current</p>
-            <p className="font-semibold text-slate-200">${data.current_price.toLocaleString()}</p>
-          </div>
-          <Tooltip text={SECTION_TIPS.expected_move} wide>
-            <div className="bg-dark-700/50 rounded-lg p-2.5 w-full cursor-help">
-              <p className="text-slate-600 mb-0.5 flex items-center gap-1">
-                <Zap size={9} /> Expected
-              </p>
-              <p className={`font-semibold ${data.expected_move_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {data.expected_move_pct >= 0 ? '+' : ''}{data.expected_move_pct}%
-              </p>
-            </div>
-          </Tooltip>
-          <Tooltip text="Target Price — current price ± the magnitude model's predicted % move, applied in the direction of the classifier. A second model (LGBMRegressor) estimates how big tomorrow's move will be, independent from the UP/DOWN direction." wide align="right">
-            <div className="bg-dark-700/50 rounded-lg p-2.5 w-full cursor-help">
-              <p className="text-slate-600 mb-0.5">Target</p>
-              <p className="font-semibold text-slate-200">
-                ${data.target_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-              </p>
-            </div>
-          </Tooltip>
-        </div>
-
-        {/* Walk-forward validation — labelled as "Report Card" for non-technical users */}
-        <div className="border-t border-dark-600/60 pt-3 space-y-2">
+          {/* Direction + confidence */}
           <div className="flex items-center justify-between">
-            <Tooltip text={SECTION_TIPS.wf_accuracy} wide>
-              <span className="text-xs text-slate-500 font-medium cursor-help underline decoration-dotted decoration-slate-600 underline-offset-2">
-                Historical Report Card
-              </span>
-            </Tooltip>
-            <Tooltip text={SECTION_TIPS.wf_std} align="right">
-              <span className="text-xs text-slate-600 cursor-help">
-                {data.wf_rounds} rounds · ±{data.wf_accuracy_std}%
-              </span>
-            </Tooltip>
-          </div>
-          <div className="flex items-center gap-3 min-w-0">
-            <span className={`text-xl font-bold ${wfColor} flex-shrink-0`}>{data.wf_accuracy}%</span>
-            <div className="flex-1 min-w-0">
-              <WFSparkline
-                history={data.wf_accuracy_history}
-                dates={data.wf_dates}
-                diagnostics={data.wf_diagnostics}
-                trainedOnDays={data.trained_on_days}
-                wfRounds={data.wf_rounds}
-              />
+            <div className="flex items-center gap-2">
+              <Icon size={22} className={dirColor} />
+              <Badge tone={toneFromSignal(data.direction)} size="lg">{data.direction}</Badge>
             </div>
+            <Tooltip text={SECTION_TIPS.confidence} wide align="right">
+              <div className="text-right cursor-help">
+                <div className="flex items-center justify-end gap-1.5">
+                  <span className={`text-2xl font-bold ${dirColor}`}>{data.confidence_pct}%</span>
+                  {data.is_calibrated ? (
+                    <span className={`text-xs px-1.5 py-0.5 rounded border ${
+                      data.regime === 'BEAR'
+                        ? 'bg-red-900/40 text-red-300 border-red-700/40'
+                        : data.regime === 'BULL'
+                        ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700/40'
+                        : 'bg-cyan-900/50 text-cyan-400 border-cyan-700/40'
+                    }`}>
+                      CAL{data.regime && data.regime !== 'NEUTRAL' ? `-${data.regime}` : ''}
+                    </span>
+                  ) : (
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-dark-600 text-slate-600 border border-dark-500/40">
+                      RAW
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-600">confidence</p>
+              </div>
+            </Tooltip>
           </div>
-          <Tooltip
-            text={
-              data.wf_accuracy >= 55
-                ? 'In most rolling test windows the model correctly predicted next-day direction on data it had never seen. You can lean on this signal, but always confirm with intraday context and news.'
-                : data.wf_accuracy >= 50
-                ? 'Marginally better than a coin-flip. Some windows were reliable, others were not. Check the sparkline — if recent bars (right side) are red, current conditions are hard for the model.'
-                : 'Recent test windows were worse than random. Likely causes: earnings surprise, VIX spike, or sudden regime change. Hover the red bars for per-period context. Do not act on this signal alone.'
-            }
-            wide
-          >
-            <p className="text-xs text-slate-600 cursor-help">
-              {data.wf_accuracy >= 55
-                ? '✓ Model generalises well on out-of-sample data'
-                : data.wf_accuracy >= 50
-                ? '⚠ Near coin-flip — treat signals with caution'
-                : '✗ Below random — market may be in unusual regime'}
-            </p>
-          </Tooltip>
-        </div>
 
-        {/* Model Insights — expandable feature importance chart */}
-        {(data.feature_importances_1d?.length > 0 || data.top_features?.length > 0) && (
-          <ModelInsights data={data} />
+          {/* Sentiment adjustment */}
+          <SentimentAdjustment
+            raw={data.raw_confidence_pct}
+            adjusted={data.confidence_pct}
+            sentiment_label={data.sentiment_label}
+          />
+
+          {/* Price + magnitude */}
+          <div className="grid grid-cols-3 gap-3 text-xs">
+            <div className="bg-dark-700/50 rounded-lg p-2.5">
+              <p className="text-slate-600 mb-0.5">Current</p>
+              <p className="font-semibold text-slate-200">${data.current_price.toLocaleString()}</p>
+            </div>
+            <Tooltip text={SECTION_TIPS.expected_move} wide>
+              <div className="bg-dark-700/50 rounded-lg p-2.5 w-full cursor-help">
+                <p className="text-slate-600 mb-0.5 flex items-center gap-1">
+                  <Zap size={9} /> Expected
+                </p>
+                <p className={`font-semibold ${data.expected_move_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {data.expected_move_pct >= 0 ? '+' : ''}{data.expected_move_pct}%
+                </p>
+              </div>
+            </Tooltip>
+            <Tooltip text="Target Price — current price ± the magnitude model's predicted % move, applied in the direction of the classifier. A second model (LGBMRegressor) estimates how big tomorrow's move will be, independent from the UP/DOWN direction." wide align="right">
+              <div className="bg-dark-700/50 rounded-lg p-2.5 w-full cursor-help">
+                <p className="text-slate-600 mb-0.5">Target</p>
+                <p className="font-semibold text-slate-200">
+                  ${data.target_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                </p>
+              </div>
+            </Tooltip>
+          </div>
+        </>
         )}
 
-        {/* Footer */}
-        <div className="flex items-center justify-between text-xs text-slate-600 border-t border-dark-600/40 pt-2">
-          <span>Trained on {data.trained_on_days} days · {data.features_used} features</span>
-          <Tooltip text={SECTION_TIPS.static_accuracy} align="right">
-            <span className="cursor-help underline decoration-dotted decoration-slate-700 underline-offset-2">
-              Static acc: {data.model_accuracy}%
-            </span>
-          </Tooltip>
-        </div>
+        {section === 'report' && (
+        <>
+          {/* Walk-forward validation — labelled as "Report Card" for non-technical users */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Tooltip text={SECTION_TIPS.wf_accuracy} wide>
+                <span className="text-xs text-slate-500 font-medium cursor-help underline decoration-dotted decoration-slate-600 underline-offset-2">
+                  Historical Report Card
+                </span>
+              </Tooltip>
+              <Tooltip text={SECTION_TIPS.wf_std} align="right">
+                <span className="text-xs text-slate-600 cursor-help">
+                  {data.wf_rounds} rounds · ±{data.wf_accuracy_std}%
+                </span>
+              </Tooltip>
+            </div>
+            <div className="flex items-center gap-3 min-w-0">
+              <span className={`text-xl font-bold ${wfColor} flex-shrink-0`}>{data.wf_accuracy}%</span>
+              <div className="flex-1 min-w-0">
+                <WFSparkline
+                  history={data.wf_accuracy_history}
+                  dates={data.wf_dates}
+                  diagnostics={data.wf_diagnostics}
+                  trainedOnDays={data.trained_on_days}
+                  wfRounds={data.wf_rounds}
+                />
+              </div>
+            </div>
+            <Tooltip
+              text={
+                data.wf_accuracy >= 55
+                  ? 'In most rolling test windows the model correctly predicted next-day direction on data it had never seen. You can lean on this signal, but always confirm with intraday context and news.'
+                  : data.wf_accuracy >= 50
+                  ? 'Marginally better than a coin-flip. Some windows were reliable, others were not. Check the sparkline — if recent bars (right side) are red, current conditions are hard for the model.'
+                  : 'Recent test windows were worse than random. Likely causes: earnings surprise, VIX spike, or sudden regime change. Hover the red bars for per-period context. Do not act on this signal alone.'
+              }
+              wide
+            >
+              <p className="text-xs text-slate-600 cursor-help">
+                {data.wf_accuracy >= 55
+                  ? '✓ Model generalises well on out-of-sample data'
+                  : data.wf_accuracy >= 50
+                  ? '⚠ Near coin-flip — treat signals with caution'
+                  : '✗ Below random — market may be in unusual regime'}
+              </p>
+            </Tooltip>
+          </div>
+
+          {/* Model Insights — expandable feature importance chart */}
+          {(data.feature_importances_1d?.length > 0 || data.top_features?.length > 0) && (
+            <ModelInsights data={data} />
+          )}
+
+          {/* Footer */}
+          <div className="flex items-center justify-between text-xs text-slate-600 border-t border-dark-600/40 pt-2">
+            <span>Trained on {data.trained_on_days} days · {data.features_used} features</span>
+            <Tooltip text={SECTION_TIPS.static_accuracy} align="right">
+              <span className="cursor-help underline decoration-dotted decoration-slate-700 underline-offset-2">
+                Static acc: {data.model_accuracy}%
+              </span>
+            </Tooltip>
+          </div>
+
+          {/* Signal Intelligence — this stock's backtested signal weights */}
+          <div className="pt-1 border-t border-dark-600/60">
+            <SignalIntelligence symbol={symbol} />
+          </div>
+
+          {/* Prediction History — this stock's logged ML call track record */}
+          <PredictionHistoryTab symbols={[symbol]} compact />
+        </>
+        )}
+
+        {section === 'scenario' && (
+          <ScenarioCalculator prediction={data} />
+        )}
 
       </div>)}
     </div>

@@ -518,6 +518,36 @@ function AccuracyBar({ label, accuracy, total, icon }) {
   )
 }
 
+// ── Compact single-symbol row (used when embedded in the Market tab) ─────────
+
+function CompactRow({ date, label, row }) {
+  if (!row) return null
+  const dirColor = row.direction === 'UP' ? 'text-emerald-400' : row.direction === 'DOWN' ? 'text-red-400' : 'text-slate-400'
+  const isHigh   = row.confidence_pct >= 58
+  const horizonTip = label === '1W' ? TIPS.horizon1w : TIPS.horizon1d
+  return (
+    <div className="flex items-center gap-3 py-2 border-b border-dark-600/30 last:border-0">
+      <span className="text-xs text-slate-500 w-14 shrink-0">{fmtDate(date)}</span>
+      <div className="flex-1 min-w-0 flex items-center gap-1.5">
+        <Tooltip text={horizonTip}>
+          <span className="text-[10px] font-semibold text-slate-600 uppercase cursor-help underline decoration-dotted w-6 shrink-0">
+            {label}
+          </span>
+        </Tooltip>
+        <DirIcon direction={row.direction} size={11} />
+        <span className={`text-xs font-bold ${dirColor}`}>{row.direction}</span>
+        <span className="text-xs tabular-nums text-slate-400">{row.confidence_pct.toFixed(1)}%</span>
+        {isHigh && (
+          <Tooltip text={TIPS.highConfStar}>
+            <span className="text-xs text-amber-400 font-bold cursor-help">★</span>
+          </Tooltip>
+        )}
+      </div>
+      <OutcomeDot outcome={row.outcome} movePct={row.actual_move_pct} />
+    </div>
+  )
+}
+
 // ── Accuracy card ─────────────────────────────────────────────────────────────
 
 function AccuracyCard({ symbols }) {
@@ -668,7 +698,13 @@ function CollapsibleCallsSection({ title, subtitle, accentClass, defaultOpen, he
 
 // ── Main component ─────────────────────────────────────────────────────────────
 
-export default function PredictionHistoryTab({ symbols }) {
+// `compact`: renders a trimmed single-symbol view for embedding in the Market
+// tab's right panel — accuracy card + a plain call/track-record list, no VIX
+// banner and no populate/refresh-outcomes admin controls (those stay on the
+// Recommendations page; data still auto-populates/auto-resolves in the
+// background via the effects below either way). Expects `symbols` to be a
+// single-symbol array, e.g. symbols={[selectedSymbol]}.
+export default function PredictionHistoryTab({ symbols, compact = false }) {
   const navigate    = useNavigate()
   const setSymbol   = useMarketStore(s => s.setSymbol)
   const qc = useQueryClient()
@@ -796,6 +832,61 @@ export default function PredictionHistoryTab({ symbols }) {
   const tomorrowGroup = groups.find(g => g.date === TOMORROW)
   const todayGroup    = groups.find(g => g.date === TODAY)
   const historyGroups = groups.filter(g => g.date !== TODAY && g.date !== TOMORROW)
+
+  if (compact) {
+    const tomorrowEntry = tomorrowGroup?.symbolEntries[0]
+    const todayEntry    = todayGroup?.symbolEntries[0]
+    return (
+      <div className="space-y-3">
+        <AccuracyCard symbols={symbols} />
+
+        {(tomorrowEntry || todayEntry) && (
+          <div className="card space-y-0 p-4">
+            <Tooltip text={TIPS.todayCalls} wide>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1 cursor-help underline decoration-dotted inline-block">
+                Today's / Upcoming Calls
+              </p>
+            </Tooltip>
+            {tomorrowEntry && (
+              <>
+                <CompactRow date={TOMORROW} label="1W" row={tomorrowEntry['1w']} />
+                <CompactRow date={TOMORROW} label="1D" row={tomorrowEntry['1d']} />
+              </>
+            )}
+            {todayEntry && (
+              <>
+                <CompactRow date={TODAY} label="1W" row={todayEntry['1w']} />
+                <CompactRow date={TODAY} label="1D" row={todayEntry['1d']} />
+              </>
+            )}
+          </div>
+        )}
+
+        {historyGroups.length > 0 && (
+          <div className="card space-y-0 p-4 max-h-80 overflow-y-auto">
+            <Tooltip text={TIPS.trackRecord} wide>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1 cursor-help underline decoration-dotted inline-block sticky -top-4 bg-dark-800 pt-4 pb-1 -mx-4 px-4">
+                Track Record
+              </p>
+            </Tooltip>
+            {historyGroups.map(g => {
+              const entry = g.symbolEntries[0]
+              return entry ? (
+                <div key={g.date}>
+                  <CompactRow date={g.date} label="1W" row={entry['1w']} />
+                  <CompactRow date={g.date} label="1D" row={entry['1d']} />
+                </div>
+              ) : null
+            })}
+          </div>
+        )}
+
+        <p className="text-xs text-slate-600">
+          Full multi-symbol track record and manual refresh controls are on the Recommendations tab.
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6">
