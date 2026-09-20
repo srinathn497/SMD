@@ -15,9 +15,13 @@ import IntradayPanel from '../components/signals/IntradayPanel'
 import ConvictionBadge from '../components/signals/ConvictionBadge'
 import OptionsFlowPanel from '../components/signals/OptionsFlowPanel'
 import NewsPanel from '../components/news/NewsPanel'
-import ScenarioCalculator from '../components/signals/ScenarioCalculator'
 import FundamentalCard from '../components/signals/FundamentalCard'
 import VolumeHistoryCard from '../components/signals/VolumeHistoryCard'
+
+const SIGNALS_SUBTABS = [
+  { key: 'intraday', label: 'Intraday' },
+  { key: 'daily',    label: 'Daily Technicals' },
+]
 
 const VIEWS = [
   { key: 'chart',  label: 'Price Chart',    icon: TrendingUp },
@@ -239,8 +243,32 @@ function ChartPanel({ symbol, assetType, interval, setInterval }) {
   )
 }
 
+// ── Signals tab: Intraday context vs. daily technical indicators ──────────────
+// Two unrelated systems (intraday microstructure vs. daily RSI/MACD/BB/EMA) that
+// only shared a tab because both are "signals" by name — split via sub-tabs
+// instead of stacking them.
+function SignalsSection({ symbol, assetType, dailyDirection, dailyConfidence }) {
+  const [sub, setSub] = useState('intraday')
+  return (
+    <div className="space-y-3">
+      <SegmentedControl options={SIGNALS_SUBTABS} value={sub} onChange={setSub} variant="neutral" />
+      {sub === 'intraday' && (
+        <IntradayPanel
+          symbol={symbol}
+          assetType={assetType}
+          dailyDirection={dailyDirection}
+          dailyConfidence={dailyConfidence}
+        />
+      )}
+      {sub === 'daily' && (
+        <SignalCard symbol={symbol} assetType={assetType} />
+      )}
+    </div>
+  )
+}
+
 // ── Right column: tabbed panel ────────────────────────────────────────────────
-function RightPanel({ symbol, assetType, prediction, onPeriodChange, onHorizonChange, dailyDirection, dailyConfidence }) {
+function RightPanel({ symbol, assetType, onPeriodChange, onHorizonChange, dailyDirection, dailyConfidence }) {
   const [activeTab, setActiveTab] = useState('conviction')
 
   return (
@@ -258,15 +286,12 @@ function RightPanel({ symbol, assetType, prediction, onPeriodChange, onHorizonCh
         )}
 
         {activeTab === 'signals' && (
-          <>
-            <IntradayPanel
-              symbol={symbol}
-              assetType={assetType}
-              dailyDirection={dailyDirection}
-              dailyConfidence={dailyConfidence}
-            />
-            <SignalCard symbol={symbol} assetType={assetType} />
-          </>
+          <SignalsSection
+            symbol={symbol}
+            assetType={assetType}
+            dailyDirection={dailyDirection}
+            dailyConfidence={dailyConfidence}
+          />
         )}
 
         {activeTab === 'fundamentals' && (
@@ -278,15 +303,12 @@ function RightPanel({ symbol, assetType, prediction, onPeriodChange, onHorizonCh
         )}
 
         {activeTab === 'prediction' && (
-          <>
-            <PredictionCard
-              symbol={symbol}
-              assetType={assetType}
-              onPeriodChange={onPeriodChange}
-              onHorizonChange={onHorizonChange}
-            />
-            <ScenarioCalculator prediction={prediction} />
-          </>
+          <PredictionCard
+            symbol={symbol}
+            assetType={assetType}
+            onPeriodChange={onPeriodChange}
+            onHorizonChange={onHorizonChange}
+          />
         )}
       </div>
     </div>
@@ -328,7 +350,6 @@ export default function Market() {
         <RightPanel
           symbol={selectedSymbol}
           assetType={selectedAssetType}
-          prediction={prediction}
           onPeriodChange={setPeriod}
           onHorizonChange={setHorizon}
           dailyDirection={prediction?.direction ?? 'UNKNOWN'}
