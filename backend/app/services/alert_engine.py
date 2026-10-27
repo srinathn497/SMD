@@ -107,7 +107,7 @@ async def _evaluate_alert(alert: Alert) -> tuple[bool, float]:
             prediction = await asyncio.to_thread(ml_predictor.predict, alert.symbol, df)
             min_confidence = threshold if threshold else 70.0
             expected_dir = "UP" if condition == "ML_PREDICT_UP" else "DOWN"
-            fired = (prediction.direction == expected_dir and
+            fired = (prediction.direction == expected_dir and not prediction.no_edge and
                      prediction.confidence_pct >= min_confidence)
             return fired, price
         except Exception as e:

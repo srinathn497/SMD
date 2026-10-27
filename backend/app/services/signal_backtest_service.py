@@ -144,9 +144,10 @@ def _signals_on_window(
 
     # ── Fundamental signals (stocks only, current snapshot) ──────────────────
     if asset_type == "stock" and fund:
-        hs = fund.get("health_score", 3)
-        if hs >= 5:   results["Fundamentals"] = "UP"
-        elif hs <= 2: results["Fundamentals"] = "DOWN"
+        # Same rule as the live conviction signal (judged on criteria with data)
+        hd = fund.get("health_direction")
+        if hd == "BUY":    results["Fundamentals"] = "UP"
+        elif hd == "SELL": results["Fundamentals"] = "DOWN"
 
         fcf = fund.get("fcf_yield_pct")
         if fcf is not None:
@@ -175,7 +176,7 @@ async def _fetch_fund(symbol: str) -> dict:
         if fd is None:
             return {}
         return {
-            "health_score":   getattr(fd, "health_score",   3),
+            "health_direction": getattr(fd, "health_direction", "NEUTRAL"),
             "fcf_yield_pct":  getattr(fd, "fcf_yield_pct",  None),
             "debt_to_equity": getattr(fd, "debt_to_equity", None),
             "pe_ratio":       getattr(fd, "pe_ratio",       None),

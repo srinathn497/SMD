@@ -40,6 +40,10 @@ async def init_db():
         for stmt in (
             "ALTER TABLE prediction_log ADD COLUMN signals_json TEXT",
             "ALTER TABLE option_trades ADD COLUMN trade_side TEXT DEFAULT 'LONG'",
+            "ALTER TABLE prediction_log ADD COLUMN regime TEXT",
+            "ALTER TABLE prediction_log ADD COLUMN raw_confidence_pct FLOAT",
+            "ALTER TABLE prediction_log ADD COLUMN base_date DATE",
+            "ALTER TABLE prediction_log ADD COLUMN model_version INTEGER",
         ):
             try:
                 await conn.execute(text(stmt))

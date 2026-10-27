@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { API_ORIGIN } from './apiBase'
 
-const BASE = 'http://localhost:8000/api/v1/option-trades'
+const BASE = `${API_ORIGIN}/api/v1/option-trades`
 
 async function fetchOptionTrades() {
   const r = await fetch(BASE)

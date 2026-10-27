@@ -37,11 +37,15 @@ _SYMBOL_TIMEOUT = 150
 _SCAN_TIMEOUT = 300
 
 
-async def _scan_one(symbol: str, asset_type: str, sem: asyncio.Semaphore) -> ConvictionCache | None:
+async def _scan_one(
+    symbol: str, asset_type: str, sem: asyncio.Semaphore, bypass_gates: bool = False
+) -> ConvictionCache | None:
     """
     Compute conviction for one symbol, guarded by a semaphore slot and a
     per-symbol timeout.  Returns None on any error or timeout.
     Also logs 1d and 1w ML predictions to the prediction_log table.
+    `bypass_gates=True` (watchlist symbols) skips the NEUTRAL/WEAK conviction
+    filter below — a deliberately curated watchlist should get every call tracked.
     """
     async with sem:
         try:
@@ -72,7 +76,8 @@ async def _scan_one(symbol: str, asset_type: str, sem: asyncio.Semaphore) -> Con
                     )
                     # Conviction gate: only log MODERATE+ predictions.
                     # NEUTRAL/WEAK have too much noise — they pollute accuracy stats.
-                    if result.label in ("NEUTRAL", "WEAK"):
+                    # Bypassed for watchlist symbols (bypass_gates=True).
+                    if result.label in ("NEUTRAL", "WEAK") and not bypass_gates:
                         logger.debug(
                             f"[conviction_scanner] {symbol}: skipping pred_log "
                             f"— conviction {result.label} ({result.score}/{result.max_score})"
@@ -93,7 +98,12 @@ async def _scan_one(symbol: str, asset_type: str, sem: asyncio.Semaphore) -> Con
                                     confidence_pct= ml_res.confidence_pct,
                                     is_calibrated = ml_res.is_calibrated,
                                     price_at_log  = ml_res.current_price,
+                                    base_date     = ml_res.as_of_date,
                                     signals_json  = signals_snapshot,
+                                    regime        = ml_res.regime,
+                                    raw_confidence_pct = ml_res.raw_confidence_pct,
+                                    no_edge       = ml_res.no_edge,
+                                    model_version = ml_res.model_version,
                                 )
                             except Exception as e_hz:
                                 logger.debug(f"[conviction_scanner] pred_log {symbol}/{hz}: {e_hz}")
@@ -136,14 +146,18 @@ async def run_conviction_scan(extra: list[tuple[str, str]] | None = None) -> int
 
     _scan_running = True
     try:
-        # Build universe
+        # Build universe. Track which symbols came from `extra` (the watchlist) —
+        # they bypass the NEUTRAL/WEAK pred-log gate since the user deliberately
+        # wants every watchlist call tracked, not just the confident ones.
         universe: list[tuple[str, str]] = []
         for sym, _ in DEFAULT_STOCKS:
             universe.append((sym, "stock"))
         for sym, _ in DEFAULT_CRYPTO:
             universe.append((sym, "crypto"))
+        watchlist_symbols: set[str] = set()
         if extra:
             for sym, atype in extra:
+                watchlist_symbols.add(sym.upper())
                 if (sym, atype) not in universe:
                     universe.append((sym, atype))
 
@@ -153,7 +167,10 @@ async def run_conviction_scan(extra: list[tuple[str, str]] | None = None) -> int
         )
 
         sem = asyncio.Semaphore(3)
-        tasks = [asyncio.create_task(_scan_one(sym, atype, sem)) for sym, atype in universe]
+        tasks = [
+            asyncio.create_task(_scan_one(sym, atype, sem, bypass_gates=sym.upper() in watchlist_symbols))
+            for sym, atype in universe
+        ]
 
         # Overall scan deadline. asyncio.wait (unlike wait_for(gather(...))) keeps
         # the results of everything that finished — a timeout no longer discards

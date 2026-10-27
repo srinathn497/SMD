@@ -118,13 +118,15 @@ def compute_portfolio_risk(
     logger.info(f"[risk] Downloading {len(all_download)} symbols: {all_download}")
 
     try:
-        raw = yf.download(
-            all_download,
-            period=PERIOD,
-            interval="1d",
-            auto_adjust=True,
-            progress=False,
-        )
+        from app.services.market_context import YF_DOWNLOAD_LOCK
+        with YF_DOWNLOAD_LOCK:
+            raw = yf.download(
+                all_download,
+                period=PERIOD,
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+            )
     except Exception as e:
         logger.warning(f"[risk] Download failed: {e}")
         return _empty_risk(f"Failed to download price data: {e}", total_value)

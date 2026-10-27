@@ -50,7 +50,7 @@ async def retrain_all_job():
     for sym, atype in symbols:
         try:
             df = await market_data_service.get_ohlcv_df(sym, atype, "1d", period="3y")
-            ml_predictor.train(sym, df, training_period="3y")
+            await asyncio.to_thread(ml_predictor.train, sym, df, training_period="3y")
             success += 1
         except Exception as e:
             logger.warning(f"Retrain failed for {sym}: {e}")
@@ -105,36 +105,33 @@ async def resolve_prediction_logs_job(force: bool = False):
         logger.warning(f"[resolve_predictions] job failed: {e}")
 
 
-def _next_trading_day() -> "date":
-    from datetime import date, timedelta
-    d = date.today() + timedelta(days=1)
-    while d.weekday() >= 5:   # 5=Sat, 6=Sun
-        d += timedelta(days=1)
-    return d
-
-
 async def populate_next_day_predictions_job():
-    """Post-close job at 4:35 PM ET (Mon–Fri): log next-trading-day predictions using today's close."""
+    """
+    Post-close job at 4:35 PM ET (Mon–Fri): log next-trading-day predictions using
+    today's close. Today's bar is final by then, so populate_predictions() labels
+    the rows with the next session on its own.
+    """
     from sqlalchemy import select
     from app.models.watchlist import WatchlistItem
     from app.services.prediction_log_service import populate_predictions
 
-    tomorrow = _next_trading_day()
     symbols = [sym for sym, _ in DEFAULT_STOCKS + DEFAULT_CRYPTO]
+    watchlist_symbols: set[str] = set()
 
     try:
         async with AsyncSessionLocal() as session:
             rows = (await session.execute(select(WatchlistItem))).scalars().all()
             for row in rows:
                 sym = row.symbol.upper()
+                watchlist_symbols.add(sym)
                 if sym not in symbols:
                     symbols.append(sym)
     except Exception as e:
         logger.warning(f"Next-day populate: failed to load watchlist: {e}")
 
-    logger.info(f"[next_day_populate] Logging predictions for {tomorrow} ({len(symbols)} symbols)")
-    count = await populate_predictions(symbols, logged_date=tomorrow)
-    logger.info(f"[next_day_populate] Done: {count} new rows for {tomorrow}")
+    logger.info(f"[next_day_populate] Logging predictions ({len(symbols)} symbols)")
+    count = await populate_predictions(symbols, bypass_gates_for=watchlist_symbols)
+    logger.info(f"[next_day_populate] Done: {count} new rows")
 
 
 async def retrain_intraday_job():
@@ -163,12 +160,42 @@ async def retrain_intraday_job():
         try:
             df_15m = await market_data_service.get_ohlcv_df(sym, atype, "15m", period="60d")
             df_1d  = await market_data_service.get_ohlcv_df(sym, atype, "1d",  period="3mo")
-            intra_predictor.train(sym, df_15m, df_1d, atype)
+            await asyncio.to_thread(intra_predictor.train, sym, df_15m, df_1d, atype)
             success += 1
         except Exception as e:
             logger.warning(f"Intraday retrain failed for {sym}: {e}")
             fail += 1
     logger.info(f"Intraday retrain complete — success: {success}, failed: {fail}")
+
+
+async def _missed_prediction_log(now=None) -> bool:
+    """
+    True if the latest completed stock session has no logged calls AND the next
+    session hasn't opened yet — i.e. the 4:35 PM job was missed (machine off) and
+    logging now still predicts a session that hasn't started. Days already past
+    are never backfilled: today's models have seen what happened since.
+    """
+    from datetime import datetime, time as dtime, timedelta
+    from zoneinfo import ZoneInfo
+    from sqlalchemy import select
+    from app.models.prediction_log import PredictionLog
+    from app.services.prediction_log_service import is_bar_complete, next_session
+
+    et = ZoneInfo("America/New_York")
+    now = now or datetime.now(et)
+    d = now.date()
+    while d.weekday() >= 5 or not is_bar_complete(d, "stock"):
+        d -= timedelta(days=1)
+    next_open = datetime.combine(next_session(d, "stock"), dtime(9, 30), tzinfo=et)
+    if now >= next_open:
+        return False
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(
+            select(PredictionLog.id).where(
+                PredictionLog.base_date == d, PredictionLog.asset_type == "stock"
+            ).limit(1)
+        )).first()
+    return row is None
 
 
 async def startup_catchup():
@@ -233,6 +260,12 @@ async def startup_catchup():
         if ideas_missing:
             logger.info("[startup] Generating catch-up trade ideas...")
             await generate_trade_ideas()
+        try:
+            if await _missed_prediction_log():
+                logger.info("[startup] Missed the 4:35 PM prediction log — logging now")
+                await populate_next_day_predictions_job()
+        except Exception as exc:
+            logger.warning(f"[startup] Prediction-log catch-up failed: {exc}")
         # Per-stock signal backtest — always check regardless of cache/ideas state
         from app.services.signal_backtest_service import should_run_backtest
         if await should_run_backtest():
@@ -303,6 +336,10 @@ async def lifespan(app: FastAPI):
     # Pre-load signal weights into memory so first conviction compute is fast
     from app.services.signal_performance_service import refresh_weights
     asyncio.create_task(refresh_weights())
+
+    # Pre-load the ML meta-calibrator (if one was already fit) so predict() has it immediately
+    from app.services.meta_calibration_service import load_meta_calibrators_from_disk
+    load_meta_calibrators_from_disk()
 
     # Catch up any jobs missed while the machine was off overnight
     asyncio.create_task(startup_catchup())

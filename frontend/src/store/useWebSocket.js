@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useMarketStore } from './marketStore'
 import { useAlertStore } from './alertStore'
 import toast from 'react-hot-toast'
+import { WS_ORIGIN } from '../api/apiBase'
 
 export function useWebSocket(symbols = []) {
   const updateLivePrice = useMarketStore(s => s.updateLivePrice)
@@ -13,7 +14,7 @@ export function useWebSocket(symbols = []) {
   useEffect(() => {
     if (!symbols.length) return
     const symStr = symbols.join(',')
-    const url = `ws://localhost:8000/ws/prices?symbols=${encodeURIComponent(symStr)}`
+    const url = `${WS_ORIGIN}/ws/prices?symbols=${encodeURIComponent(symStr)}`
     const ws = new WebSocket(url)
     wsRef.current = ws
 

@@ -38,7 +38,10 @@ MODELS_DIR.mkdir(exist_ok=True)
 # older bundles unusable or not comparable. needs_retrain() flags any bundle
 # with a lower version for a one-time rebuild.
 #   5 — XGB blend + separate 1D/1W feature sets + auto-prune + version stamp
-BUNDLE_VERSION = 5
+#   6 — saved models fitted on all rows (were fitted on the first 80% only)
+#   7 — walk-forward uses the saved model's setup + final features, purged;
+#       smooth (Platt) calibration replaces isotonic/regime; naive baseline + edge
+BUNDLE_VERSION = 7
 
 # A bundle file older than this is considered stale even if the schema matches —
 # picked up by the manual "Refresh Models" job (and by predict() when it is
@@ -47,7 +50,9 @@ _MAX_BUNDLE_AGE_DAYS = 30
 
 # Walk-forward params
 WF_MIN_TRAIN_DAYS = 126   # 6 months minimum training window
-WF_TEST_DAYS      = 10    # ~2 weeks per test window — more rounds, finer resolution
+WF_TEST_DAYS      = 21    # ~1 month per test window — WF now fits the full 300-tree models
+MIN_CAL_POINTS    = 100   # fewer held-out predictions than this → no calibration
+MIN_EDGE          = 0.01  # WF accuracy must beat the naive baseline by 1 pt to count
 
 
 def _safe_symbol(symbol: str) -> str:
@@ -269,7 +274,12 @@ def _prune_features(importances: list[dict], current_cols: list[str]) -> tuple[l
     return above, below
 
 
-def _build_features(df: pd.DataFrame, symbol: str = "", earnings_dates: list | None = None) -> pd.DataFrame:
+def _build_features(
+    df: pd.DataFrame,
+    symbol: str = "",
+    earnings_dates: list | None = None,
+    for_predict: bool = False,
+) -> pd.DataFrame:
     df = df.copy()
     df.columns = [c.lower() for c in df.columns]
     # Remove duplicate dates yfinance occasionally produces (causes reindex errors downstream)
@@ -504,6 +514,10 @@ def _build_features(df: pd.DataFrame, symbol: str = "", earnings_dates: list | N
     # multi-horizon targets are NaN are kept — filtered per-horizon in train/predict.
     # NOTE: blackout rows are NOT filtered here — callers handle that.
     # train() excludes them from training; predict() reads the flag from the live bar.
+    # for_predict: keep rows with no target yet — the latest bar never has one,
+    # and it is exactly the row predict() must score.
+    if for_predict:
+        return df[out_cols].dropna(subset=available)
     return df[out_cols].dropna(subset=available + ["target_dir", "target_mag"])
 
 
@@ -571,7 +585,16 @@ def _make_diagnostic(window: pd.DataFrame, accuracy: float) -> str:
     return "\n".join(lines)
 
 
-# ── XGBoost helper ────────────────────────────────────────────────────────────
+# ── Model factories (shared by walk-forward, held-out split and saved model) ──
+
+def _make_lgbm_classifier() -> LGBMClassifier:
+    # class_weight='balanced' corrects the UP bias from bull-dominated training data
+    return LGBMClassifier(
+        n_estimators=300, learning_rate=0.03, max_depth=6, num_leaves=31,
+        min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
+        class_weight="balanced", random_state=42, verbose=-1,
+    )
+
 
 def _make_xgb_classifier(n_estimators: int = 300) -> XGBClassifier:
     return XGBClassifier(
@@ -579,6 +602,60 @@ def _make_xgb_classifier(n_estimators: int = 300) -> XGBClassifier:
         max_depth=6, subsample=0.8, colsample_bytree=0.8,
         eval_metric="logloss", random_state=42, verbosity=0,
     )
+
+
+def _fit_final(X: np.ndarray, y: np.ndarray, cols: list[str], y_mag: np.ndarray | None = None) -> dict:
+    """
+    Fit the models that get saved, on ALL rows. The 80/20 fits in train() only
+    produce the held-out accuracy numbers — without this the live model never
+    saw the most recent 20% of history. Same hyperparameters and recency weights.
+    """
+    scaler = StandardScaler()
+    X_sc = scaler.fit_transform(X)
+    X_df = pd.DataFrame(X_sc, columns=cols)
+    wts = np.linspace(0.5, 1.0, len(X))
+    lgbm = _make_lgbm_classifier()
+    lgbm.fit(X_df, y, sample_weight=wts)
+    xgb = _make_xgb_classifier()
+    xgb.fit(X_sc, y, sample_weight=wts)
+    out = {"scaler": scaler, "lgbm": lgbm, "xgb": xgb}
+    if y_mag is not None:
+        reg = LGBMRegressor(
+            n_estimators=300, learning_rate=0.03, max_depth=5, num_leaves=25,
+            min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
+            random_state=42, verbose=-1,
+        )
+        reg.fit(X_df, y_mag, sample_weight=wts)
+        out["regressor"] = reg
+    return out
+
+
+# ── Calibration ───────────────────────────────────────────────────────────────
+
+def _fit_platt(probas: list[float], actuals: list[int]) -> dict | None:
+    """
+    Smooth calibration: P(up) = sigmoid(a · logit(p) + b), fitted on the
+    walk-forward held-out predictions. Two numbers, so it can't snap outputs to a
+    few steps the way isotonic did on a few hundred points. None when there are
+    too few points. When the model's probabilities don't rank outcomes (a ≤ 0)
+    the honest answer is the base rate, so a = 0 and b = logit(up-rate).
+    """
+    if len(probas) < MIN_CAL_POINTS or len(set(actuals)) < 2:
+        return None
+    from sklearn.linear_model import LogisticRegression
+    p = np.clip(np.asarray(probas, dtype=float), 1e-4, 1 - 1e-4)
+    x = np.log(p / (1 - p)).reshape(-1, 1)
+    lr = LogisticRegression(C=1.0).fit(x, np.asarray(actuals, dtype=int))
+    a, b = float(lr.coef_[0][0]), float(lr.intercept_[0])
+    if a <= 0:
+        rate = float(np.clip(np.mean(actuals), 1e-3, 1 - 1e-3))
+        a, b = 0.0, float(np.log(rate / (1 - rate)))
+    return {"a": a, "b": b, "n": len(probas)}
+
+
+def _apply_calibration(cal, p: float) -> float:
+    p = min(max(p, 1e-4), 1 - 1e-4)
+    return float(1 / (1 + np.exp(-(cal["a"] * np.log(p / (1 - p)) + cal["b"]))))
 
 
 # ── Walk-forward validation ────────────────────────────────────────────────────
@@ -589,11 +666,16 @@ def _walk_forward(
     target_col: str = "target_dir",
     min_train: int  = WF_MIN_TRAIN_DAYS,
     test_days: int  = WF_TEST_DAYS,
+    purge: int      = 1,
 ) -> dict:
     """
-    Rolling walk-forward over test_days-day test windows.
+    Rolling walk-forward over test_days-day test windows, using the same model
+    setup as the saved model so the calibrator learns the saved model's scale.
     target_col selects which label to use (target_dir / target_1w / target_1m).
-    Returns per-round accuracy list, date labels, diagnostics, and calibrator.
+    purge = label horizon in bars: the last `purge` training rows are dropped
+    because their labels look into the test window (1w: 5, 1m: 21).
+    Returns per-round accuracy, date labels, diagnostics, calibrator, and the
+    naive baseline (bet the training window's usual direction) on the same rows.
     """
     # Drop rows where the chosen target is NaN (e.g. last 5 rows for target_1w)
     valid = feat_df.dropna(subset=[target_col])
@@ -612,20 +694,16 @@ def _walk_forward(
     n     = len(X_all)
     idx   = valid.index
 
-    # Indices of regime columns in the unscaled feature matrix (0/1 flags)
-    bull_idx = feature_cols.index("regime_bull") if "regime_bull" in feature_cols else None
-    bear_idx = feature_cols.index("regime_bear") if "regime_bear" in feature_cols else None
-
     accuracies:  list[float]      = []
     dates:       list[list[str]]  = []
     diagnostics: list[str]        = []
     all_probas:  list[float]      = []
     all_actuals: list[int]        = []
-    all_regimes: list[str]        = []   # "bull" | "bear" | "neutral" per held-out row
+    baseline_hits = 0
     start = min_train
 
     while start + test_days <= n:
-        X_tr, y_tr = X_all[:start], y_all[:start]
+        X_tr, y_tr = X_all[:start - purge], y_all[:start - purge]
         X_te, y_te = X_all[start:start + test_days], y_all[start:start + test_days]
 
         sc = StandardScaler()
@@ -639,15 +717,11 @@ def _walk_forward(
         X_tr_df = pd.DataFrame(X_tr_sc, columns=feature_cols)
         X_te_df = pd.DataFrame(X_te_sc, columns=feature_cols)
 
-        # Ensemble: blend LGBM + XGBoost 50/50 for diversity
-        # class_weight='balanced' corrects the UP bias from bull-dominated training data
-        lgbm_wf = LGBMClassifier(n_estimators=100, learning_rate=0.1,
-                                  max_depth=5, class_weight="balanced",
-                                  random_state=42, verbose=-1)
+        # Ensemble: blend LGBM + XGBoost 50/50 — same setup as the saved model
+        lgbm_wf = _make_lgbm_classifier()
         lgbm_wf.fit(X_tr_df, y_tr, sample_weight=wts)
 
-        xgb_wf = XGBClassifier(n_estimators=100, learning_rate=0.1, max_depth=5,
-                                eval_metric="logloss", random_state=42, verbosity=0)
+        xgb_wf = _make_xgb_classifier()
         xgb_wf.fit(X_tr_sc, y_tr, sample_weight=wts)
 
         blended = (lgbm_wf.predict_proba(X_te_df)[:, 1] +
@@ -659,15 +733,9 @@ def _walk_forward(
         all_probas.extend(blended.tolist())
         all_actuals.extend(y_te.tolist())
 
-        # Track regime for each held-out test row (using unscaled X_te)
-        for j in range(len(blended)):
-            if bull_idx is not None and bear_idx is not None:
-                r = ("bull" if X_te[j, bull_idx] > 0.5
-                     else "bear" if X_te[j, bear_idx] > 0.5
-                     else "neutral")
-            else:
-                r = "neutral"
-            all_regimes.append(r)
+        # Naive baseline: always bet the training window's more common direction
+        usual = 1 if y_tr.mean() >= 0.5 else 0
+        baseline_hits += int((y_te == usual).sum())
 
         # Actual date range of this test window
         ts_start = pd.Timestamp(idx[start])
@@ -683,37 +751,20 @@ def _walk_forward(
 
         start += test_days
 
-    # ── Calibrators: one global + one per regime ─────────────────────────────
-    # Global calibrator: fitted on all held-out WF predictions (fallback)
-    # Regime calibrators: fitted on regime-filtered subsets — learns that
-    #   the model's UP confidence is systematically wrong in bear markets.
-    # Minimum 15 points per bucket to fit reliably.
-    from sklearn.isotonic import IsotonicRegression
-
-    calibrator = None
-    if len(all_probas) >= 30:
-        calibrator = IsotonicRegression(out_of_bounds="clip").fit(all_probas, all_actuals)
-
-    cal_regime: dict[str, object] = {}
-    for regime_name in ("bull", "bear", "neutral"):
-        mask = [r == regime_name for r in all_regimes]
-        r_p  = [p for p, m in zip(all_probas,  mask) if m]
-        r_a  = [a for a, m in zip(all_actuals, mask) if m]
-        if len(r_p) >= 15:
-            cal_regime[regime_name] = IsotonicRegression(out_of_bounds="clip").fit(r_p, r_a)
-            logger.debug(
-                f"Regime calibrator '{regime_name}': {len(r_p)} samples, "
-                f"mean_prob={np.mean(r_p):.2f}, mean_actual={np.mean(r_a):.2f}"
-            )
+    calibrator = _fit_platt(all_probas, all_actuals)
+    n_held = len(all_actuals)
+    pooled   = (float(np.mean((np.array(all_probas) >= 0.5) == np.array(all_actuals)))
+                if n_held else None)
+    baseline = baseline_hits / n_held if n_held else None
+    edge     = round(pooled - baseline, 4) if n_held else None
+    extra = {"calibrator": calibrator,
+             "wf_baseline": round(baseline, 4) if baseline is not None else None,
+             "wf_edge": edge}
 
     if not accuracies:
         return {"wf_accuracy": 0.0, "wf_accuracy_std": 0.0,
                 "wf_rounds": 0, "wf_accuracy_history": [],
-                "wf_dates": [], "wf_diagnostics": [],
-                "calibrator": calibrator,
-                "calibrator_bull":    cal_regime.get("bull"),
-                "calibrator_bear":    cal_regime.get("bear"),
-                "calibrator_neutral": cal_regime.get("neutral")}
+                "wf_dates": [], "wf_diagnostics": [], **extra}
 
     arr = np.array(accuracies)
     return {
@@ -723,10 +774,7 @@ def _walk_forward(
         "wf_accuracy_history": [round(a, 4) for a in accuracies],
         "wf_dates":            dates,
         "wf_diagnostics":      diagnostics,
-        "calibrator":          calibrator,
-        "calibrator_bull":     cal_regime.get("bull"),
-        "calibrator_bear":     cal_regime.get("bear"),
-        "calibrator_neutral":  cal_regime.get("neutral"),
+        **extra,
     }
 
 
@@ -775,14 +823,7 @@ class MLPredictor:
         # Recency weights: oldest bar = 0.5, newest bar = 1.0
         train_weights = np.linspace(0.5, 1.0, split)
 
-        classifier_lgbm = LGBMClassifier(
-            n_estimators=300, learning_rate=0.03,
-            max_depth=6, num_leaves=31,
-            min_child_samples=20,
-            subsample=0.8, colsample_bytree=0.8,
-            class_weight="balanced",
-            random_state=42, verbose=-1,
-        )
+        classifier_lgbm = _make_lgbm_classifier()
         # Wrap scaled arrays in DataFrames so LGBM retains feature names (suppresses warning)
         X_tr_df = pd.DataFrame(X_tr_sc, columns=feature_cols_1d)
         X_te_df = pd.DataFrame(X_te_sc, columns=feature_cols_1d)
@@ -807,12 +848,6 @@ class MLPredictor:
         regressor.fit(X_tr_df, y_mag[:split], sample_weight=train_weights)
         mag_mae = float(mean_absolute_error(y_mag[split:], regressor.predict(X_te_df)))
 
-        # ── Walk-forward validation (1-day) ──────────────────────────────────
-        logger.info(f"[{symbol}] Running walk-forward validation…")
-        wf = _walk_forward(feat_df, feature_cols_1d)
-        logger.info(f"[{symbol}] WF accuracy: {wf['wf_accuracy']:.1%} "
-                    f"± {wf['wf_accuracy_std']:.1%} over {wf['wf_rounds']} rounds")
-
         # ── 1D: feature importance + auto-prune low-signal features ──────────
         importances_1d = _importance_list(classifier_lgbm, feature_cols_1d)
         kept_1d, pruned_1d = _prune_features(importances_1d, feature_cols_1d)
@@ -825,11 +860,7 @@ class MLPredictor:
             _Xte = scaler_1d.transform(_X[split:])
             _Xtr_df = pd.DataFrame(_Xtr, columns=feature_cols_1d)
             _Xte_df = pd.DataFrame(_Xte, columns=feature_cols_1d)
-            classifier_lgbm = LGBMClassifier(
-                n_estimators=300, learning_rate=0.03, max_depth=6, num_leaves=31,
-                min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
-                class_weight="balanced", random_state=42, verbose=-1,
-            )
+            classifier_lgbm = _make_lgbm_classifier()
             classifier_lgbm.fit(_Xtr_df, y_dir[:split], sample_weight=train_weights)
             classifier_xgb = _make_xgb_classifier()
             classifier_xgb.fit(_Xtr, y_dir[:split], sample_weight=train_weights)
@@ -844,6 +875,18 @@ class MLPredictor:
             regressor.fit(_Xtr_df, y_mag[:split], sample_weight=train_weights)
             mag_mae = float(mean_absolute_error(y_mag[split:], regressor.predict(_Xte_df)))
             importances_1d = _importance_list(classifier_lgbm, feature_cols_1d)
+
+        # ── Walk-forward validation (1-day) — on the final feature list ──────
+        logger.info(f"[{symbol}] Running walk-forward validation…")
+        wf = _walk_forward(feat_df, feature_cols_1d)
+        logger.info(f"[{symbol}] WF accuracy: {wf['wf_accuracy']:.1%} "
+                    f"± {wf['wf_accuracy_std']:.1%} over {wf['wf_rounds']} rounds, "
+                    f"edge vs naive {wf['wf_edge']}")
+
+        # Saved 1D models: refit on all rows (accuracy numbers above stay held-out)
+        final = _fit_final(feat_1d[feature_cols_1d].values, y_dir, feature_cols_1d, y_mag)
+        scaler_1d, classifier_lgbm = final["scaler"], final["lgbm"]
+        classifier_xgb, regressor  = final["xgb"], final["regressor"]
 
         # ── Multi-horizon ensemble classifiers (1-week & 1-month) ────────────
         multi: dict = {}
@@ -865,35 +908,25 @@ class MLPredictor:
             if y_h.ndim != 1:
                 y_h = y_h[:, 0]
             sp_h  = int(len(X_h) * 0.8)
-            wts_h = np.linspace(0.5, 1.0, sp_h)
+            tr_h  = sp_h - hz_days     # purge: these rows' labels look into the test rows
+            wts_h = np.linspace(0.5, 1.0, tr_h)
 
             hz_scaler = StandardScaler()
-            X_h_tr_sc = hz_scaler.fit_transform(X_h[:sp_h])
+            X_h_tr_sc = hz_scaler.fit_transform(X_h[:tr_h])
             X_h_te_sc = hz_scaler.transform(X_h[sp_h:])
             X_h_tr_df = pd.DataFrame(X_h_tr_sc, columns=hz_fcols)
             X_h_te_df = pd.DataFrame(X_h_te_sc, columns=hz_fcols)
 
-            clf_lgbm_h = LGBMClassifier(
-                n_estimators=300, learning_rate=0.03,
-                max_depth=6, num_leaves=31, min_child_samples=20,
-                subsample=0.8, colsample_bytree=0.8,
-                class_weight="balanced",
-                random_state=42, verbose=-1,
-            )
-            clf_lgbm_h.fit(X_h_tr_df, y_h[:sp_h], sample_weight=wts_h)
+            clf_lgbm_h = _make_lgbm_classifier()
+            clf_lgbm_h.fit(X_h_tr_df, y_h[:tr_h], sample_weight=wts_h)
 
             clf_xgb_h = _make_xgb_classifier()
-            clf_xgb_h.fit(X_h_tr_sc, y_h[:sp_h], sample_weight=wts_h)
+            clf_xgb_h.fit(X_h_tr_sc, y_h[:tr_h], sample_weight=wts_h)
 
             blended_h_te = (clf_lgbm_h.predict_proba(X_h_te_df)[:, 1] +
                             clf_xgb_h.predict_proba(X_h_te_sc)[:, 1]) / 2.0
             sa_h = float(accuracy_score(y_h[sp_h:], (blended_h_te >= 0.5).astype(int)))
 
-            logger.info(f"[{symbol}] Running {hz_name} walk-forward…")
-            wf_h = _walk_forward(feat_h, hz_fcols, target_col=tcol, test_days=hz_days)
-            logger.info(
-                f"[{symbol}] {hz_name} WF: {wf_h['wf_accuracy']:.1%} over {wf_h['wf_rounds']} rounds"
-            )
             # Importances + auto-prune (1W only — 1M is secondary, skip prune)
             imp_h = _importance_list(clf_lgbm_h, hz_fcols)
             pruned_h: list[str] = []
@@ -905,22 +938,30 @@ class MLPredictor:
                     feature_cols_1w = kept_h
                     _Xh = feat_h[hz_fcols].values
                     hz_scaler = StandardScaler()
-                    _Xhtr = hz_scaler.fit_transform(_Xh[:sp_h])
+                    _Xhtr = hz_scaler.fit_transform(_Xh[:tr_h])
                     _Xhte = hz_scaler.transform(_Xh[sp_h:])
                     _Xhtr_df = pd.DataFrame(_Xhtr, columns=hz_fcols)
                     _Xhte_df = pd.DataFrame(_Xhte, columns=hz_fcols)
-                    clf_lgbm_h = LGBMClassifier(
-                        n_estimators=300, learning_rate=0.03, max_depth=6, num_leaves=31,
-                        min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
-                        class_weight="balanced", random_state=42, verbose=-1,
-                    )
-                    clf_lgbm_h.fit(_Xhtr_df, y_h[:sp_h], sample_weight=wts_h)
+                    clf_lgbm_h = _make_lgbm_classifier()
+                    clf_lgbm_h.fit(_Xhtr_df, y_h[:tr_h], sample_weight=wts_h)
                     clf_xgb_h = _make_xgb_classifier()
-                    clf_xgb_h.fit(_Xhtr, y_h[:sp_h], sample_weight=wts_h)
+                    clf_xgb_h.fit(_Xhtr, y_h[:tr_h], sample_weight=wts_h)
                     _bh = (clf_lgbm_h.predict_proba(_Xhte_df)[:, 1] +
                            clf_xgb_h.predict_proba(_Xhte)[:, 1]) / 2.0
                     sa_h = float(accuracy_score(y_h[sp_h:], (_bh >= 0.5).astype(int)))
                     imp_h = _importance_list(clf_lgbm_h, hz_fcols)
+
+            # Walk-forward on the final feature list, purged by the label horizon
+            logger.info(f"[{symbol}] Running {hz_name} walk-forward…")
+            wf_h = _walk_forward(feat_h, hz_fcols, target_col=tcol, purge=hz_days)
+            logger.info(
+                f"[{symbol}] {hz_name} WF: {wf_h['wf_accuracy']:.1%} over {wf_h['wf_rounds']} rounds, "
+                f"edge vs naive {wf_h['wf_edge']}"
+            )
+
+            # Saved models for this horizon: refit on all rows
+            final_h = _fit_final(feat_h[hz_fcols].values, y_h, hz_fcols)
+            hz_scaler, clf_lgbm_h, clf_xgb_h = final_h["scaler"], final_h["lgbm"], final_h["xgb"]
 
             if hz_name == "1w":
                 scaler_1w = hz_scaler
@@ -938,6 +979,8 @@ class MLPredictor:
             multi[f"wf_dates_{hz_name}"]            = wf_h["wf_dates"]
             multi[f"wf_diagnostics_{hz_name}"]      = wf_h["wf_diagnostics"]
             multi[f"calibrator_{hz_name}"]          = wf_h["calibrator"]
+            multi[f"wf_baseline_{hz_name}"]         = wf_h["wf_baseline"]
+            multi[f"wf_edge_{hz_name}"]             = wf_h["wf_edge"]
 
         # ── Feature importance (from LGBM primary) ───────────────────────────
         importances = dict(zip(feature_cols_1d,
@@ -965,12 +1008,7 @@ class MLPredictor:
             "trained_on":        len(feat_df),
             "training_period":   training_period,
             "top_features":      top_features,
-            # Regime calibrators stored at top level (1d horizon only;
-            # 1w/1m use global calibrator — fewer held-out rows per regime)
-            "calibrator_bull":    wf.get("calibrator_bull"),
-            "calibrator_bear":    wf.get("calibrator_bear"),
-            "calibrator_neutral": wf.get("calibrator_neutral"),
-            **wf,
+            **wf,                              # 1D: wf_* stats, calibrator, wf_baseline, wf_edge
             **multi,
         }, MODELS_DIR / f"{safe}.pkl")
 
@@ -1018,7 +1056,7 @@ class MLPredictor:
         # (a) read the live bar's in_earnings_blackout flag, and
         # (b) read regime from the most recent bar.
         # Training filters blackout rows separately inside train().
-        feat_df = _build_features(df, symbol, earnings_dates)
+        feat_df = _build_features(df, symbol, earnings_dates, for_predict=True)
         if feat_df.empty:
             raise ValueError("Could not build features for prediction")
 
@@ -1042,8 +1080,9 @@ class MLPredictor:
         if horizon in ("1w", "1m") and f"classifier_lgbm_{horizon}" in bundle:
             clf_lgbm_use = bundle[f"classifier_lgbm_{horizon}"]
             clf_xgb_use  = bundle.get(f"classifier_xgb_{horizon}")
-            # 1w/1m use global calibrator (fewer held-out rows per regime bucket)
             cal_use   = bundle.get(f"calibrator_{horizon}")
+            edge_k    = f"wf_edge_{horizon}"
+            base_k    = f"wf_baseline_{horizon}"
             wf_key    = f"wf_accuracy_{horizon}"
             wf_std_k  = f"wf_accuracy_std_{horizon}"
             wf_rnd_k  = f"wf_rounds_{horizon}"
@@ -1055,9 +1094,9 @@ class MLPredictor:
             horizon      = "1d"   # fall back gracefully if 1w/1m not trained yet
             clf_lgbm_use = clf_lgbm
             clf_xgb_use  = clf_xgb
-            # For 1d: prefer regime-specific calibrator, fall back to global
-            cal_use = (bundle.get(f"calibrator_{live_regime}")
-                       or bundle.get("calibrator"))
+            cal_use   = bundle.get("calibrator")
+            edge_k    = "wf_edge"
+            base_k    = "wf_baseline"
             wf_key    = "wf_accuracy"
             wf_std_k  = "wf_accuracy_std"
             wf_rnd_k  = "wf_rounds"
@@ -1084,17 +1123,22 @@ class MLPredictor:
         else:
             raw_up_proba = lgbm_prob
 
-        # Apply isotonic regression calibrator if available (fitted on WF held-out data)
-        if cal_use is not None:
-            cal_up_proba  = float(cal_use.predict([raw_up_proba])[0])
+        # Direction comes from the model. Calibration (fitted on the same model's
+        # walk-forward predictions) only says how often that side has been right.
+        # If it says < 50%, the model has no usable call here → NEUTRAL.
+        model_dir = "UP" if raw_up_proba >= 0.5 else "DOWN"
+        if isinstance(cal_use, dict):
+            cal_up_proba  = _apply_calibration(cal_use, raw_up_proba)
             is_calibrated = True
         else:
             cal_up_proba  = raw_up_proba
             is_calibrated = False
+        side_proba = cal_up_proba if model_dir == "UP" else 1.0 - cal_up_proba
+        direction  = model_dir if side_proba >= 0.5 else "NEUTRAL"
+        raw_confidence = round(max(side_proba, 0.5) * 100, 1)   # calibrated, pre-sentiment
 
-        direction      = "UP" if cal_up_proba >= 0.5 else "DOWN"
-        cal_confidence = (cal_up_proba if direction == "UP" else 1.0 - cal_up_proba) * 100
-        raw_confidence = round(cal_confidence, 1)   # calibrated, pre-sentiment
+        edge    = bundle.get(edge_k)
+        no_edge = edge is None or edge < MIN_EDGE
 
         # ── Magnitude (regressor always uses 1D features) ─────────────────────
         last_row_1d_df    = pd.DataFrame(last_row_1d_sc, columns=available_1d)
@@ -1105,13 +1149,18 @@ class MLPredictor:
         # We use abs(magnitude) and flip to match the classifier direction.
         magnitude = abs(expected_move_pct)
         target_price = (current_price * (1 + magnitude / 100) if direction == "UP"
-                        else current_price * (1 - magnitude / 100))
+                        else current_price * (1 - magnitude / 100) if direction == "DOWN"
+                        else current_price)
 
-        # ── Sentiment adjustment (±12 pp max) ─────────────────────────────────
+        # ── Sentiment adjustment (±12 pp max) — only on a directional call ────
         aligned = (direction == "UP"   and sentiment_score >= 0) or \
                   (direction == "DOWN" and sentiment_score <= 0)
-        adjustment = abs(sentiment_score) * 12 * (1 if aligned else -1)
+        adjustment = abs(sentiment_score) * 12 * (1 if aligned else -1) if direction != "NEUTRAL" else 0.0
         adj_confidence = round(min(99.0, max(1.0, raw_confidence + adjustment)), 1)
+
+        # ── Meta-calibration: trust-adjust confidence using this model's own track record ──
+        from app.services.meta_calibration_service import get_meta_confidence
+        meta_confidence = get_meta_confidence(horizon, adj_confidence)
 
         # ── ATR-based trade levels (% of price, scaled by horizon) ────────────
         # 1d: 1.5× TP / 1.0× SL;  1w: 3.0× / 2.0×;  1m: 6.0× / 4.0×
@@ -1142,7 +1191,13 @@ class MLPredictor:
             confidence_pct=adj_confidence,
             raw_confidence_pct=raw_confidence,
             is_calibrated=is_calibrated,
+            model_up_pct=round(raw_up_proba * 100, 1),
+            wf_baseline=round(bundle[base_k] * 100, 1) if bundle.get(base_k) is not None else None,
+            wf_edge=round(edge * 100, 1) if edge is not None else None,
+            no_edge=no_edge,
+            model_version=bundle.get("bundle_version"),
             current_price=round(current_price, 6),
+            as_of_date=feat_df.index[-1].date(),
             target_price=round(target_price, 6),
             expected_move_pct=round(expected_move_pct, 2),
             # Walk-forward (reliable accuracy) — horizon-specific
@@ -1176,6 +1231,8 @@ class MLPredictor:
             # Regime & blackout
             earnings_blackout_active=in_blackout,
             regime=regime,
+            # Meta-calibration
+            meta_confidence_pct=meta_confidence,
         )
 
     def clear_cache(self, symbol: str) -> bool:
@@ -1194,7 +1251,7 @@ class MLPredictor:
     # would (and previously did) force a retrain on every single call.
     _REQUIRED_KEYS = (
         "classifier_lgbm", "classifier_xgb", "regressor", "wf_diagnostics",
-        "calibrator", "calibrator_bull",
+        "wf_edge", "wf_edge_1w",
         "classifier_lgbm_1w", "features_1d", "features_1w", "scaler_1d",
     )
 

@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Query
 from pydantic import BaseModel
@@ -16,28 +16,37 @@ _populate_running: bool = False
 _next_day_populate_running: bool = False
 
 
+async def _get_watchlist_symbols() -> set[str]:
+    from sqlalchemy import select
+    from app.database import AsyncSessionLocal
+    from app.models.watchlist import WatchlistItem
+
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(select(WatchlistItem))).scalars().all()
+            return {row.symbol.upper() for row in rows}
+    except Exception:
+        return set()
+
+
 async def _run_populate_bg(sym_list: list[str]) -> None:
     global _populate_running
     _populate_running = True
     try:
-        await populate_predictions(sym_list)
+        watchlist_symbols = await _get_watchlist_symbols()
+        await populate_predictions(sym_list, bypass_gates_for=watchlist_symbols)
     finally:
         _populate_running = False
 
 
-def _next_trading_day() -> date:
-    from datetime import timedelta
-    d = date.today() + timedelta(days=1)
-    while d.weekday() >= 5:
-        d += timedelta(days=1)
-    return d
-
-
 async def _run_next_day_populate_bg(sym_list: list[str]) -> None:
+    # Same as a plain populate — the session label comes from the last completed
+    # bar, so next-day rows only appear once today's close is final.
     global _next_day_populate_running
     _next_day_populate_running = True
     try:
-        await populate_predictions(sym_list, logged_date=_next_trading_day())
+        watchlist_symbols = await _get_watchlist_symbols()
+        await populate_predictions(sym_list, bypass_gates_for=watchlist_symbols)
     finally:
         _next_day_populate_running = False
 
@@ -48,6 +57,7 @@ class PredictionLogOut(BaseModel):
     asset_type:       str
     horizon:          str
     logged_date:      date
+    base_date:        date | None
     direction:        str
     confidence_pct:   float
     is_calibrated:    bool
@@ -85,6 +95,13 @@ class SymbolAccuracyOut(BaseModel):
     hc_accuracy_pct: float | None = None
 
 
+class ConfidenceBucketOut(BaseModel):
+    label:    str
+    total:    int
+    avg_conf: float
+    hit_pct:  float
+
+
 class AccuracySummaryOut(BaseModel):
     total:           int
     correct:         int
@@ -94,6 +111,12 @@ class AccuracySummaryOut(BaseModel):
     hc_correct:      int = 0
     hc_total:        int = 0
     hc_accuracy_pct: float | None = None
+    log_days:        int = 0               # distinct days calls were made from
+    first_date:      str | None = None
+    last_date:       str | None = None
+    baseline_up_pct: float | None = None   # "always UP" score on the same graded calls
+    overlap_dropped: int = 0               # overlapping 1W calls counted once
+    confidence_buckets: list[ConfidenceBucketOut] = []
     by_horizon:      dict[str, HorizonAccuracyOut] = {}
     by_direction:    dict[str, DirectionAccuracyOut] = {}
     by_symbol:       dict[str, SymbolAccuracyOut] = {}
@@ -191,7 +214,7 @@ async def start_next_day_populate(
         except Exception:
             pass
     background_tasks.add_task(_run_next_day_populate_bg, sym_list)
-    return {"status": "started", "logged_date": str(_next_trading_day()), "count": len(sym_list)}
+    return {"status": "started", "count": len(sym_list)}
 
 
 @router.post("/resolve")

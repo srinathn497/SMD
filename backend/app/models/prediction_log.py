@@ -16,6 +16,9 @@ class PredictionLog(Base):
     asset_type:  Mapped[str]  = mapped_column(String(10), default="stock")
     horizon:     Mapped[str]  = mapped_column(String(5),  nullable=False)   # "1d" | "1w"
     logged_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    # Date of the completed bar price_at_log is the close of; the call is graded
+    # on the Nth session after it. NULL on rows logged before 2026-10-15.
+    base_date:   Mapped[date | None] = mapped_column(Date, nullable=True)
 
     # Prediction captured at log time
     direction:      Mapped[str]   = mapped_column(String(4),  nullable=False)  # UP | DOWN
@@ -25,6 +28,13 @@ class PredictionLog(Base):
 
     # Conviction signal snapshot at prediction time — used for signal weight learning
     signals_json: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Context at log time — used for future regime-conditional meta-calibration.
+    # Nullable; not backfilled for rows logged before this column existed.
+    regime:             Mapped[str | None]   = mapped_column(String(7), nullable=True)  # BULL|BEAR|NEUTRAL
+    raw_confidence_pct: Mapped[float | None] = mapped_column(Float,     nullable=True)  # pre-sentiment
+    # ml_predictor BUNDLE_VERSION of the model that made the call (NULL before v7)
+    model_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Resolution — filled by nightly resolve job
     resolve_at_date:  Mapped[date | None]     = mapped_column(Date,     nullable=True)

@@ -4,8 +4,8 @@ import axios from 'axios'
 export const fetchQuote = (symbol, assetType) =>
   axios.get(`/api/v1/market/quote`, { params: { symbol, asset_type: assetType } }).then(r => r.data)
 
-export const fetchHistory = (symbol, assetType, interval = '1d') =>
-  axios.get(`/api/v1/market/history`, { params: { symbol, asset_type: assetType, interval } }).then(r => r.data)
+export const fetchHistory = (symbol, assetType, interval = '1d', period) =>
+  axios.get(`/api/v1/market/history`, { params: { symbol, asset_type: assetType, interval, ...(period && { period }) } }).then(r => r.data)
 
 export const searchSymbols = (q) =>
   axios.get(`/api/v1/market/search`, { params: { q } }).then(r => r.data)
@@ -18,10 +18,11 @@ export const useQuote = (symbol, assetType) =>
     enabled: !!symbol,
   })
 
-export const useHistory = (symbol, assetType, interval) =>
+// period: optional override of the backend's default lookback (e.g. '3y')
+export const useHistory = (symbol, assetType, interval, period) =>
   useQuery({
-    queryKey: ['history', symbol, assetType, interval],
-    queryFn: () => fetchHistory(symbol, assetType, interval),
+    queryKey: ['history', symbol, assetType, interval, period ?? null],
+    queryFn: () => fetchHistory(symbol, assetType, interval, period),
     enabled: !!symbol,
     staleTime: 60000,
   })

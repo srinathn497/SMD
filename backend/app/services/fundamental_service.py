@@ -20,9 +20,11 @@ Health Score (0–6) and direction (BUY / SELL / NEUTRAL):
     5. Free Cash Flow    > 0
     6. Analyst consensus majority BUY
 
-  5–6 → STRONG  → BUY
-  3–4 → MODERATE → NEUTRAL
-  0–2 → WEAK    → SELL
+  Judged out of the criteria that have data (need ≥ 4, else UNKNOWN):
+  ≥ 80% passed → STRONG   → BUY
+  35–79%       → MODERATE → NEUTRAL
+  ≤ 34%        → WEAK     → SELL
+  (with all 6 available: 5–6 / 3–4 / 0–2)
 """
 import logging
 import time
@@ -34,6 +36,7 @@ logger = logging.getLogger("fundamental_service")
 
 _CACHE: dict[str, tuple[float, object]] = {}
 _CACHE_TTL = 6 * 3600  # 6 hours
+_MIN_CRITERIA = 4      # fewer criteria with data → UNKNOWN, no vote
 
 
 @dataclass
@@ -79,7 +82,8 @@ class FundamentalData:
     consensus: AnalystConsensus = field(default_factory=AnalystConsensus)
 
     # ── Health assessment ─────────────────────────────────────────────────────
-    health_score:     int = 0          # 0–6
+    health_score:     int = 0          # criteria passed
+    health_available: int = 0          # criteria with data (score is out of this)
     health_label:     str = "UNKNOWN"  # STRONG / MODERATE / WEAK / UNKNOWN
     health_direction: str = "NEUTRAL"  # BUY / SELL / NEUTRAL
 
@@ -268,12 +272,18 @@ def get_fundamentals(symbol: str, current_price: float | None = None) -> Fundame
     px = current_price or _safe(info, "currentPrice") or _safe(info, "regularMarketPrice")
     data.consensus = _analyst_consensus(ticker, px, info)
 
-    # Health score
+    # Health score — judged on the criteria that have data, so a missing field
+    # doesn't count as a fail. Same cut-offs as 5–6 / 3–4 / 0–2 out of 6.
     data.health_score, data.criteria = _health_score(data)
-    if data.health_score >= 5:
+    data.health_available = sum(1 for v in data.criteria.values() if v is not None)
+    ratio = data.health_score / data.health_available if data.health_available else 0.0
+    if data.health_available < _MIN_CRITERIA:
+        data.health_label     = "UNKNOWN"
+        data.health_direction = "NEUTRAL"
+    elif ratio >= 0.8:
         data.health_label     = "STRONG"
         data.health_direction = "BUY"
-    elif data.health_score >= 3:
+    elif ratio > 0.34:
         data.health_label     = "MODERATE"
         data.health_direction = "NEUTRAL"
     else:

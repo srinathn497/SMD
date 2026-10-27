@@ -116,6 +116,8 @@ export default function FundamentalCard({ symbol, assetType }) {
   if (isError || !data) return null
 
   const cfg      = HEALTH[data.health_label] ?? HEALTH.UNKNOWN
+  // Score is out of the criteria that have data (missing ones don't count as fails)
+  const outOf    = data.health_available || 6
   const c        = data.consensus
   const dirColor = data.health_direction === 'BUY'  ? 'text-emerald-400'
     : data.health_direction === 'SELL' ? 'text-red-400' : 'text-slate-500'
@@ -127,7 +129,7 @@ export default function FundamentalCard({ symbol, assetType }) {
           <div className="flex items-center gap-3">
             <Ring
               value={data.health_score}
-              max={6}
+              max={outOf}
               size={48}
               radius={20}
               strokeWidth={3.5}
@@ -142,9 +144,11 @@ export default function FundamentalCard({ symbol, assetType }) {
               </div>
               <div className="flex items-center gap-2 mt-1.5">
                 <div className="flex-1 h-1 bg-dark-600 rounded-full overflow-hidden max-w-28">
-                  <div className={`h-full rounded-full transition-all ${cfg.bar}`} style={{ width: `${(data.health_score / 6) * 100}%` }} />
+                  <div className={`h-full rounded-full transition-all ${cfg.bar}`} style={{ width: `${(data.health_score / outOf) * 100}%` }} />
                 </div>
-                <span className="text-[10px] text-slate-500">{data.health_score}/6</span>
+                <span className="text-[10px] text-slate-500">
+                  {data.health_score}/{outOf}{outOf < 6 && ` · ${6 - outOf} no data`}
+                </span>
               </div>
               {data.revenue_growth_yoy != null && (
                 <p className="text-[10px] text-slate-500 mt-1">

@@ -19,7 +19,7 @@ The signals:
   11. Put/Call Volume      (stocks only — <0.7 = call flow dominant = bullish)
   12. Breakout+Momentum    (price breaks 20d high/low with volume + MA confirmation)
   13. Mean Reversion       (Z-score ≤ −2 = deeply oversold BUY; ≥ +2 = overextended SELL)
-  14. Fundamental Health   (health_score ≥ 5 = BUY; ≤ 2 = SELL — stocks only)
+  14. Fundamental Health   (≥ 80% of available criteria = BUY; ≤ 34% = SELL — stocks only)
   15. FCF Yield            (> 3% = BUY; < 0% = SELL — stocks only)
   16. Debt/Equity          (< 0.5 = BUY; > 2.0 = SELL — stocks only)
   17. P/E Valuation        (< 15× = value BUY; > 40× = speculative SELL — stocks only)
@@ -195,7 +195,11 @@ async def compute_conviction(
             sentiment_label=s_label,
         )
         cal_tag = " (calibrated)" if ml_result.is_calibrated else ""
-        if ml_result.confidence_pct >= 55:
+        if ml_result.no_edge or ml_result.direction not in ("UP", "DOWN"):
+            why = ("no edge vs naive baseline" if ml_result.no_edge
+                   else "no directional call after calibration")
+            ml_detail = (f"{ml_result.direction} — {why}", f"{ml_result.direction} — {why}")
+        elif ml_result.confidence_pct >= 55:
             ml_opinion = "BUY" if ml_result.direction == "UP" else "SELL"
             ml_detail  = (
                 f"{ml_result.direction} {ml_result.confidence_pct}%{cal_tag}",
@@ -325,29 +329,34 @@ async def compute_conviction(
         logger.debug(f"[{symbol}] Z-Score: {e}")
 
     # ── Signal 14: Fundamental Health (stocks only) ───────────────────────────
-    # BUY  — health_score ≥ 5/6 (STRONG fundamentals)
-    # SELL — health_score ≤ 2/6 (WEAK fundamentals)
+    # BUY  — ≥ 80% of available criteria passed (STRONG fundamentals)
+    # SELL — ≤ 34% passed (WEAK); fewer than 4 criteria with data → no vote
     fund_opinion = None
     fund_detail  = "unavailable"
     if is_stock and fund_result is not None:
         try:
             fd = fund_result
+            of = f"{fd.health_score}/{fd.health_available}"
             if fd.health_direction == "BUY":
                 fund_opinion = "BUY"
                 fund_detail  = (
-                    f"Fundamentals STRONG ({fd.health_score}/6) — "
+                    f"Fundamentals STRONG ({of}) — "
                     + ", ".join(k for k, v in fd.criteria.items() if v is True)
                 )
             elif fd.health_direction == "SELL":
                 fund_opinion = "SELL"
                 fund_detail  = (
-                    f"Fundamentals WEAK ({fd.health_score}/6) — "
+                    f"Fundamentals WEAK ({of}) — "
                     + ", ".join(k for k, v in fd.criteria.items() if v is False)
                     + " not met"
                 )
+            elif fd.health_label == "UNKNOWN":
+                fund_detail = (
+                    f"Fundamentals N/A — only {fd.health_available}/6 criteria have data"
+                )
             else:
                 fund_detail = (
-                    f"Fundamentals MODERATE ({fd.health_score}/6) — "
+                    f"Fundamentals MODERATE ({of}) — "
                     "mixed signals, no directional conviction"
                 )
         except Exception as e:
@@ -389,7 +398,9 @@ async def compute_conviction(
             raise ValueError("missing data")
         intra_ctx = compute_intraday(
             df_1h, df_1d_short, symbol,
-            daily_direction=ml_result.direction if ml_result else "UNKNOWN",
+            # A model without edge shouldn't steer the intraday verdict either
+            daily_direction=("NEUTRAL" if ml_result and ml_result.no_edge
+                             else ml_result.direction if ml_result else "UNKNOWN"),
             daily_confidence=ml_result.confidence_pct if ml_result else 0.0,
             asset_type=asset_type,
         )

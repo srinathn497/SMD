@@ -28,13 +28,13 @@ const TIPS = {
     'Accuracy when the model\'s calibrated confidence was ≥58%.\n\nPredictions below 58% are near coin-flips — the model has weak signal and these are no longer logged.\nHigh-confidence predictions reflect stronger agreement across signals and are meaningfully more reliable.\n\nFocus on ★ predictions when making trading decisions.',
 
   todayCalls:
-    'ML model predictions logged by the most recent conviction scan.\n\n1D = model\'s view on next trading day\'s close direction.\n1W = model\'s view over the next 5 trading days.\n\nUpdates nightly at 06:00 when the conviction scan runs, or instantly when you trigger a manual scan.',
+    'ML calls for this trading session, made from the previous session\'s close.\n\n1D = will this session close above or below that close?\n1W = will the close 5 sessions out be above or below it?\n\nLogged when you run a Scan, open this tab, or by the 4:35 PM ET job (if the machine is on).',
 
   horizon1d:
-    '1-Day Horizon — model predicts whether tomorrow\'s close will be higher or lower than today\'s close.\n\nResolved the next trading day after logging.',
+    '1-Day Horizon — will the next session\'s close be higher or lower than the close the call was made from?\n\nGraded once that session\'s close is final.',
 
   horizon1w:
-    '5-Day Horizon — model predicts whether the close 5 trading days from now will be higher or lower than the close when logged.\n\nResolved after 5 trading days.',
+    '5-Day Horizon — will the close 5 sessions after the base close be higher or lower than it?\n\nGraded once the 5th session\'s close is final.',
 
   highConfStar:
     'High confidence — model\'s calibrated probability ≥58%.\n\nRegime-aware calibration is applied: in bear markets the model compresses overconfident UP signals. In bull markets it amplifies strong UP signals.\n\nThese predictions have historically been more accurate than low-confidence ones. Predictions below 58% are no longer logged.',
@@ -43,7 +43,7 @@ const TIPS = {
     'Historical predictions logged by the nightly conviction scan, grouped by date.\n\nEach row shows both 1D and 1W predictions for a symbol on that date, along with the actual outcome once the target date\'s close was available.\n\nExpand a date group to see individual symbol results.',
 
   groupStats:
-    'Correct and Wrong counts for resolved predictions in this date group.\nPUSH outcomes (move < 0.3%) are excluded.\nPending = target date not yet reached.',
+    'Correct and Wrong counts for resolved predictions in this date group.\nPUSH (move < 0.5%) and VOID outcomes are excluded.\nPending = target date not yet reached.',
 
   colPrediction:
     'Direction the model predicted (UP/DOWN) and its calibrated confidence %.\n\n★ = high confidence (≥58%) — more actionable signal.\nOutcome shown once the target trading day\'s close is available.',
@@ -55,10 +55,13 @@ const TIPS = {
     'WRONG — predicted direction was opposite to actual price move.\nShows the actual % move (opposite to what the model expected).',
 
   outcomePush:
-    'PUSH — actual price move was less than 0.3%.\nToo small to call — excluded from accuracy calculation.',
+    'PUSH — actual price move was less than 0.5%.\nToo small to call — excluded from accuracy calculation.',
+
+  outcomeVoid:
+    'VOID — logged before 2026-10-15, when the price this call started from could not be traced to a daily close.\nExcluded from accuracy.',
 
   outcomePending:
-    'Pending — the target trading day hasn\'t arrived yet, or the close price data isn\'t available.\nWill auto-resolve the next time you open this tab.',
+    'Pending — the target session hasn\'t closed yet (stocks are graded after 4:15 PM ET, crypto after the UTC day ends).\nWill auto-resolve the next time you open this tab.',
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -139,6 +142,11 @@ function OutcomeDot({ outcome, movePct }) {
       </span>
     </Tooltip>
   )
+  if (outcome === 'VOID') return (
+    <Tooltip text={TIPS.outcomeVoid}>
+      <span className="text-slate-600 text-xs cursor-help line-through">Void</span>
+    </Tooltip>
+  )
   return (
     <Tooltip text={TIPS.outcomePush}>
       <span className="text-slate-500 text-xs cursor-help">Push</span>
@@ -162,7 +170,8 @@ function TodayCard({ entry, onSymbolClick }) {
     const is1w = label === '1W'
     const dirColor = row.direction === 'UP' ? 'text-emerald-400' : row.direction === 'DOWN' ? 'text-red-400' : 'text-slate-400'
     const isHigh = row.confidence_pct >= 58
-    const horizonTip = is1w ? TIPS.horizon1w : TIPS.horizon1d
+    const horizonTip = (is1w ? TIPS.horizon1w : TIPS.horizon1d) +
+      (row.base_date ? `\n\nBase: ${shortDate(row.base_date)} close $${row.price_at_log.toFixed(2)}` : '')
     return (
       <div className={`flex items-center justify-between gap-2 ${!is1w ? 'opacity-70' : ''}`}>
         <Tooltip text={horizonTip}>
@@ -219,7 +228,7 @@ function DateGroup({ group, defaultOpen, onSymbolClick }) {
 
   // Compute group-level stats (resolved rows only)
   const resolved = group.symbolEntries.flatMap(e =>
-    [e['1d'], e['1w']].filter(r => r && r.resolved && r.outcome !== 'PUSH')
+    [e['1d'], e['1w']].filter(r => r && (r.outcome === 'CORRECT' || r.outcome === 'WRONG'))
   )
   const correct = resolved.filter(r => r.outcome === 'CORRECT').length
   const wrong   = resolved.filter(r => r.outcome === 'WRONG').length
@@ -564,8 +573,12 @@ function AccuracyCard({ symbols }) {
   const {
     total, correct, wrong, push, accuracy_pct,
     hc_accuracy_pct, hc_total, hc_correct,
+    log_days, first_date, last_date, baseline_up_pct, overlap_dropped,
+    confidence_buckets = [],
     by_horizon = {}, by_direction = {}, by_symbol = {},
   } = data
+  const fmtDay = d => d ? new Date(`${d}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''
+  const graded = correct + wrong
 
   const d1   = by_horizon['1d']    ?? {}
   const d1w  = by_horizon['1w']    ?? {}
@@ -590,8 +603,9 @@ function AccuracyCard({ symbols }) {
           <BarChart2 size={16} className="text-brand-400" />
           <h3 className="text-sm font-semibold text-slate-100">Prediction Accuracy</h3>
         </div>
-        <span className="text-xs text-slate-600 bg-dark-700 border border-dark-600 rounded px-2 py-0.5">
-          {total} predictions · {correct + wrong} decisive
+        <span className="text-xs text-slate-500 bg-dark-700 border border-dark-600 rounded px-2 py-0.5">
+          {graded} graded calls · {log_days} day{log_days === 1 ? '' : 's'}
+          {first_date && ` · ${fmtDay(first_date)}${last_date !== first_date ? `–${fmtDay(last_date)}` : ''}`}
         </span>
       </div>
 
@@ -617,12 +631,39 @@ function AccuracyCard({ symbols }) {
         </div>
       </div>
 
+      {/* Baseline + sample-size honesty */}
+      {baseline_up_pct != null && (
+        <p className="text-xs text-slate-400 -mt-2">
+          Always betting UP would have scored <b className="text-slate-200">{baseline_up_pct}%</b> on the same calls.
+          {graded < 100 && <span className="text-slate-500"> Only {graded} graded calls, so these numbers can swing ±10 pts.</span>}
+        </p>
+      )}
+
+      {/* Does confidence mean anything? */}
+      {confidence_buckets.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Confidence check</p>
+          <div className="grid grid-cols-[1fr_auto_auto] gap-x-4 gap-y-1 text-xs tabular-nums">
+            <span className="text-slate-600">Model said</span>
+            <span className="text-slate-600 text-right">Calls</span>
+            <span className="text-slate-600 text-right">Actually right</span>
+            {confidence_buckets.map(b => (
+              <div key={b.label} className="contents">
+                <span className="text-slate-300">{b.label}</span>
+                <span className="text-slate-500 text-right">{b.total}</span>
+                <span className={`text-right font-semibold ${b.hit_pct >= b.avg_conf - 5 ? 'text-emerald-400' : 'text-red-400'}`}>{b.hit_pct}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* By Horizon */}
       <div className="space-y-3">
         <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">By Horizon</p>
         <div className="grid grid-cols-2 gap-4">
           <AccuracyBar
-            label="1-Week ⭐"
+            label="1-Week"
             accuracy={d1w.accuracy_pct}
             total={d1w.total}
             icon={<BarChart2 size={10} className="text-brand-400" />}
@@ -634,7 +675,9 @@ function AccuracyCard({ symbols }) {
             icon={<Clock size={10} />}
           />
         </div>
-        <p className="text-xs text-slate-600">⭐ 1-Week is more reliable — 1-Day has higher daily noise. Use 1W for trade decisions.</p>
+        {overlap_dropped > 0 && (
+          <p className="text-xs text-slate-600">{overlap_dropped} overlapping 1-Week calls counted once.</p>
+        )}
       </div>
 
       {/* By Direction */}
@@ -663,7 +706,7 @@ function AccuracyCard({ symbols }) {
 
       {/* Confidence floor note */}
       <p className="text-xs text-slate-600 pt-1">
-        ℹ New predictions: only ≥58% confidence is logged going forward. Historical data includes pre-floor predictions which lower the overall %.
+        ℹ Only calls from models that beat a naive baseline in testing are logged. Calls made before Oct 23 used the old calibration.
       </p>
     </div>
   )
@@ -934,7 +977,7 @@ export default function PredictionHistoryTab({ symbols, compact = false }) {
           </div>
         ) : (
           <p className="text-xs text-slate-600 pt-2">
-            Auto-generated at 4:35 PM ET after market close.
+            Made from today's close — available after 4:15 PM ET (auto at 4:35 PM ET if the machine is on).
           </p>
         )}
       </CollapsibleCallsSection>

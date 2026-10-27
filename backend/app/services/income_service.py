@@ -48,7 +48,9 @@ def _refresh_crumb() -> None:
         pass
     try:
         # Fallback: a minimal download resets the session crumb
-        yf.download("SPY", period="1d", progress=False, auto_adjust=True)
+        from app.services.market_context import YF_DOWNLOAD_LOCK
+        with YF_DOWNLOAD_LOCK:
+            yf.download("SPY", period="1d", progress=False, auto_adjust=True)
     except Exception:
         pass
 

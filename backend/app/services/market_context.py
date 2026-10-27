@@ -12,6 +12,7 @@ All fetches are cached in memory (30-min TTL) to avoid redundant downloads
 during the same training run.
 """
 import logging
+import threading
 import time
 from datetime import date
 
@@ -27,6 +28,12 @@ _INTRADAY_CACHE:      dict[str, tuple[float, pd.DataFrame]] = {}
 _EARN_CACHE:          dict[str, tuple[float, list]]          = {}
 _FUNDAMENTALS_CACHE:  dict[str, tuple[float, dict]]          = {}
 _CACHE_TTL = 1800   # 30 minutes
+
+# yf.download collects results in a module-global dict, so concurrent calls from
+# different threads can merge tickers into one frame (seen: HYG cached with every
+# column duplicated → macro features silently 0, or predict() failing outright).
+# Every yf.download in the app must hold this lock. yf.Ticker().history() is unaffected.
+YF_DOWNLOAD_LOCK = threading.Lock()
 
 # ── Sector ETF map ───────────────────────────────────────────────────────────────
 SECTOR_MAP: dict[str, str] = {
@@ -63,7 +70,8 @@ def get_market_df(ticker: str, period: str = "3y") -> pd.DataFrame:
         return cached[1]
 
     try:
-        raw = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+        with YF_DOWNLOAD_LOCK:
+            raw = yf.download(ticker, period=period, auto_adjust=True, progress=False)
         if raw is None or not isinstance(raw, pd.DataFrame) or raw.empty:
             raise ValueError("empty response")
         # yfinance sometimes returns an all-NaN DataFrame for bad tickers (^VIX3M etc.)
@@ -108,8 +116,9 @@ def get_intraday_df(ticker: str, interval: str = "15m", period: str = "60d") -> 
         return cached[1]
 
     try:
-        raw = yf.download(ticker, period=period, interval=interval,
-                          auto_adjust=True, progress=False)
+        with YF_DOWNLOAD_LOCK:
+            raw = yf.download(ticker, period=period, interval=interval,
+                              auto_adjust=True, progress=False)
         if raw is None or raw.empty:
             raise ValueError("empty response")
         if isinstance(raw.columns, pd.MultiIndex):

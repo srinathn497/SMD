@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import date
 from pydantic import BaseModel
 
 
@@ -23,7 +24,7 @@ class SignalResult(BaseModel):
 
 class PredictionResult(BaseModel):
     symbol: str
-    direction: str            # UP | DOWN
+    direction: str            # UP | DOWN | NEUTRAL (calibration says the model's side is < 50%)
 
     # Confidence
     confidence_pct: float         # sentiment-adjusted (primary number to show)
@@ -31,6 +32,7 @@ class PredictionResult(BaseModel):
 
     # Price
     current_price: float
+    as_of_date: date | None = None  # completed bar the features + current_price come from
     target_price: float
     expected_move_pct: float      # magnitude: predicted next-day % move
 
@@ -55,7 +57,14 @@ class PredictionResult(BaseModel):
     pruned_features_1w: list[str] = []
 
     # Calibration
-    is_calibrated: bool = False   # True if isotonic regression calibrator was applied
+    is_calibrated: bool = False   # True if the smooth (Platt) calibrator was applied
+    model_up_pct: float | None = None   # the model's own P(up) before calibration
+
+    # Edge vs a naive baseline (bet the stock's usual direction), from walk-forward
+    wf_baseline: float | None = None    # baseline accuracy % on the same held-out days
+    wf_edge: float | None = None        # WF pooled accuracy − baseline, in points
+    no_edge: bool = False               # edge < 1 pt → don't trade or log this horizon
+    model_version: int | None = None    # bundle_version that made this call
 
     # Sentiment
     sentiment_score: float        # -1.0 to +1.0
@@ -71,6 +80,11 @@ class PredictionResult(BaseModel):
     # Regime & earnings context
     earnings_blackout_active: bool = False   # earnings within 5d ahead or 2d past
     regime: str = "NEUTRAL"                  # "BULL" | "BEAR" | "NEUTRAL"
+
+    # Meta-calibration: trust-adjusted confidence learned from this model's own
+    # track record (see meta_calibration_service.py). None until enough resolved
+    # history exists for this horizon — frontend hides the comparison until then.
+    meta_confidence_pct: float | None = None
 
 
 class IntraPredictionResult(BaseModel):

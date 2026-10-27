@@ -35,6 +35,7 @@ class FundamentalOut(BaseModel):
     roa:                 float | None
     consensus:           AnalystConsensusOut
     health_score:        int
+    health_available:    int
     health_label:        str
     health_direction:    str
     criteria:            dict
@@ -66,6 +67,7 @@ async def get_fundamentals(
             roa=data.roa,
             consensus=AnalystConsensusOut(**data.consensus.__dict__),
             health_score=data.health_score,
+            health_available=data.health_available,
             health_label=data.health_label,
             health_direction=data.health_direction,
             criteria=data.criteria,

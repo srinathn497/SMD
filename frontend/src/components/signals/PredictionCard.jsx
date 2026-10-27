@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { TrendingUp, TrendingDown, Brain, AlertTriangle, Newspaper, Zap, Info, RefreshCw } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Brain, AlertTriangle, Newspaper, Zap, Info, RefreshCw } from 'lucide-react'
 import Badge, { toneFromSignal } from '../ui/Badge'
 import Tooltip from '../ui/Tooltip'
 import ExpandableSection from '../ui/ExpandableSection'
@@ -351,8 +351,9 @@ export default function PredictionCard({ symbol, assetType, onPeriodChange, onHo
   const isRefreshing = clearCache.isPending || isFetching
 
   const isUp     = data?.direction === 'UP'
-  const Icon     = isUp ? TrendingUp : TrendingDown
-  const dirColor = isUp ? 'text-emerald-400' : 'text-red-400'
+  const isFlat   = data?.direction === 'NEUTRAL'
+  const Icon     = isFlat ? Minus : isUp ? TrendingUp : TrendingDown
+  const dirColor = isFlat ? 'text-slate-400' : isUp ? 'text-emerald-400' : 'text-red-400'
   const wfColor  = !data ? 'text-slate-500'
     : data.wf_accuracy >= 55 ? 'text-emerald-400'
     : data.wf_accuracy >= 50 ? 'text-yellow-400'
@@ -509,14 +510,8 @@ export default function PredictionCard({ symbol, assetType, onPeriodChange, onHo
                 <div className="flex items-center justify-end gap-1.5">
                   <span className={`text-2xl font-bold ${dirColor}`}>{data.confidence_pct}%</span>
                   {data.is_calibrated ? (
-                    <span className={`text-xs px-1.5 py-0.5 rounded border ${
-                      data.regime === 'BEAR'
-                        ? 'bg-red-900/40 text-red-300 border-red-700/40'
-                        : data.regime === 'BULL'
-                        ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700/40'
-                        : 'bg-cyan-900/50 text-cyan-400 border-cyan-700/40'
-                    }`}>
-                      CAL{data.regime && data.regime !== 'NEUTRAL' ? `-${data.regime}` : ''}
+                    <span className="text-xs px-1.5 py-0.5 rounded border bg-cyan-900/50 text-cyan-400 border-cyan-700/40">
+                      CAL
                     </span>
                   ) : (
                     <span className="text-xs px-1.5 py-0.5 rounded bg-dark-600 text-slate-600 border border-dark-500/40">
@@ -528,6 +523,28 @@ export default function PredictionCard({ symbol, assetType, onPeriodChange, onHo
               </div>
             </Tooltip>
           </div>
+
+          {/* Model's own number, when calibration changed it */}
+          {data.is_calibrated && data.model_up_pct != null && (
+            <p className="text-xs text-slate-500 -mt-2">
+              Model said {data.model_up_pct}% chance of UP; calibrated to how often that has been right in testing.
+              {isFlat && ' That is under 50% for its side, so there is no call.'}
+            </p>
+          )}
+
+          {/* No edge vs naive baseline */}
+          {data.no_edge && (
+            <div className="flex items-start gap-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/25 rounded-lg px-3 py-2">
+              <AlertTriangle size={12} className="flex-shrink-0 mt-0.5" />
+              <span>
+                <strong>No edge.</strong>{' '}
+                {data.wf_baseline != null
+                  ? `In testing this was right ${(data.wf_baseline + (data.wf_edge ?? 0)).toFixed(1)}% of the time vs ${data.wf_baseline}% for simply betting this stock's usual direction.`
+                  : 'Not enough testing history to show it beats simply betting this stock\'s usual direction.'}
+                {' '}Not logged or counted in conviction.
+              </span>
+            </div>
+          )}
 
           {/* Sentiment adjustment */}
           <SentimentAdjustment

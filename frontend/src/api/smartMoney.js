@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
+import { API_ORIGIN } from './apiBase'
 
-const BASE = 'http://localhost:8000/api/v1'
+const BASE = `${API_ORIGIN}/api/v1`
 
 export const fetchSmartMoney = (symbols, includeCrypto = false) =>
   fetch(`${BASE}/smart-money?symbols=${encodeURIComponent(symbols)}&include_crypto=${includeCrypto}`)

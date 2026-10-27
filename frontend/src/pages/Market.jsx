@@ -9,6 +9,8 @@ import SegmentedControl from '../components/ui/SegmentedControl'
 import { useQuote, searchSymbols } from '../api/market'
 import { usePrediction } from '../api/signals'
 import CandlestickChart from '../components/charts/CandlestickChart'
+import PriceRangeCard from '../components/charts/PriceRangeCard'
+import Volume24hPanel from '../components/charts/Volume24hPanel'
 import SignalCard from '../components/signals/SignalCard'
 import PredictionCard from '../components/signals/PredictionCard'
 import IntradayPanel from '../components/signals/IntradayPanel'
@@ -26,6 +28,11 @@ const SIGNALS_SUBTABS = [
 const VIEWS = [
   { key: 'chart',  label: 'Price Chart',    icon: TrendingUp },
   { key: 'volume', label: 'Volume History', icon: BarChart2  },
+]
+
+const STATS_TABS = [
+  { key: 'range',  label: 'Price range'  },
+  { key: 'volume', label: 'Volume · 24h' },
 ]
 
 const INTERVALS = [
@@ -243,6 +250,24 @@ function ChartPanel({ symbol, assetType, interval, setInterval }) {
   )
 }
 
+// ── Under the chart: price range per period / last-24h hourly volume ─────────
+function PriceVolumeCard({ symbol, assetType }) {
+  const [tab, setTab] = useState('range')
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-3.5">
+        <SegmentedControl options={STATS_TABS} value={tab} onChange={setTab} variant="neutral" />
+        <span className="text-[11.5px] text-slate-500">
+          {tab === 'range' ? 'Low and high per period' : 'Hour by hour vs usual'}
+        </span>
+      </div>
+      {tab === 'range'
+        ? <PriceRangeCard symbol={symbol} assetType={assetType} embedded />
+        : <Volume24hPanel symbol={symbol} assetType={assetType} />}
+    </div>
+  )
+}
+
 // ── Signals tab: Intraday context vs. daily technical indicators ──────────────
 // Two unrelated systems (intraday microstructure vs. daily RSI/MACD/BB/EMA) that
 // only shared a tab because both are "signals" by name — split via sub-tabs
@@ -338,13 +363,16 @@ export default function Market() {
 
       <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-4 items-start">
 
-        {/* ── Left: chart panel (with volume history tab) ──────────────── */}
-        <ChartPanel
-          symbol={selectedSymbol}
-          assetType={selectedAssetType}
-          interval={interval}
-          setInterval={setInterval}
-        />
+        {/* ── Left: chart panel (with volume history tab) + price/volume ── */}
+        <div className="space-y-4 min-w-0">
+          <ChartPanel
+            symbol={selectedSymbol}
+            assetType={selectedAssetType}
+            interval={interval}
+            setInterval={setInterval}
+          />
+          <PriceVolumeCard symbol={selectedSymbol} assetType={selectedAssetType} />
+        </div>
 
         {/* ── Right: tabbed analysis panel ─────────────────────────────── */}
         <RightPanel
